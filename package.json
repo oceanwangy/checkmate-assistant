@@ -1,0 +1,44 @@
+{
+  "name": "checkmate-remediation-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only remediation workflow driven by Auth0 CheckMate reports",
+  "type": "module",
+  "bin": {
+    "checkmate-assistant": "dist/src/cli.js"
+  },
+  "engines": {
+    "node": ">=20.18.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-ui-assets.mjs",
+    "dev": "tsx src/cli.ts",
+    "eval:prompts": "tsx src/evaluation/evaluate-report-prompts.ts",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@auth0/auth0-checkmate": "1.8.1",
+    "@inquirer/prompts": "7.10.1",
+    "commander": "^14.0.0",
+    "dotenv": "^17.0.0",
+    "openai": "^5.0.0",
+    "yaml": "^2.8.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.30.0",
+    "@types/node": "^22.15.0",
+    "eslint": "9.30.0",
+    "eslint-config-prettier": "^10.1.0",
+    "globals": "^16.2.0",
+    "prettier": "^3.6.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "8.35.0",
+    "vitest": "^3.2.0"
+  }
+}

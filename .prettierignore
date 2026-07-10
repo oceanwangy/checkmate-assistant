@@ -1,0 +1,6 @@
+dist/
+node_modules/
+coverage/
+reports/
+remediation-plans/
+thoughts.md
