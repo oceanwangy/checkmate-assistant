@@ -17,12 +17,14 @@ import {
 } from "../auth0/configuration-reader.js";
 import {
   executeApiPlan,
+  validateApiPlan,
   type ApiExecutionResult,
+  type ApiPlanValidationResult,
 } from "../auth0/api-plan-executor.js";
 import { loadCheckmateReport } from "../checkmate/report-loader.js";
 import { executeScan } from "../commands/scan.js";
 import { loadAiConfig } from "../config/ai.js";
-import type { CheckmateConfig } from "../config/env.js";
+import { loadCheckmateConfig, type CheckmateConfig } from "../config/env.js";
 import { profiles, type ProfileName } from "../config/profiles.js";
 import { resolveReviewProfile } from "../config/review-profile.js";
 import {
@@ -32,11 +34,19 @@ import {
 import type { NormalizedCheckmateFinding } from "../findings/types.js";
 import type { ActionableChange } from "../remediation/actionable-change.js";
 import { buildActionCandidates } from "../remediation/action-candidates.js";
-import { buildApiPlan, type ApiPlan } from "../remediation/api-plan.js";
+import type { ApiPlan } from "../remediation/api-plan.js";
+import { readApiPlan, writeApiPlan } from "../remediation/api-plan-writer.js";
 import {
-  createApiPlanOutputPath,
-  writeApiPlan,
-} from "../remediation/api-plan-writer.js";
+  createChangePackagePaths,
+  type ChangePackagePaths,
+  writeTextArtifact,
+} from "../remediation/change-package-writer.js";
+import { buildProfileApiPlan } from "../remediation/profile-api-plan.js";
+import { buildTerraformReviewConfiguration } from "../remediation/terraform-plan.js";
+import {
+  validateTerraformConfiguration,
+  type TerraformValidationResult,
+} from "../remediation/terraform-validator.js";
 import { redactText } from "../security/redaction.js";
 import {
   boundedUserText,
@@ -57,7 +67,11 @@ const decisionRequestSchema = z
   .object({
     findingKey: z.string().min(1).max(500),
     status: z.enum(["approved", "accepted_risk"]),
-    rationale: z.string().trim().min(1).max(4_000),
+    rationale: z.string().trim().max(4_000),
+    selectedActionIds: z
+      .array(z.string().min(1).max(200))
+      .max(1_000)
+      .optional(),
   })
   .strict();
 const submitRequestSchema = z.object({}).strict();
@@ -65,6 +79,11 @@ const executeRequestSchema = z.object({ confirmed: z.literal(true) }).strict();
 const scanRequestSchema = z
   .object({ profile: z.enum(["dev", "prod"]) })
   .strict();
+const artifactRequestSchema = z.object({
+  profile: z.enum(["dev", "prod"]),
+  artifact: z.enum(["api", "terraform"]),
+  download: z.enum(["0", "1"]).optional(),
+});
 
 export interface UiServerOptions {
   report?: string;
@@ -81,6 +100,8 @@ export interface UiServerDependencies {
   now?: () => Date;
   configurationLoader?: typeof loadActionableConfiguration;
   planExecutor?: typeof executeApiPlan;
+  apiPlanValidator?: typeof validateApiPlan;
+  terraformValidator?: typeof validateTerraformConfiguration;
   scanExecutor?: typeof executeScan;
 }
 
@@ -96,12 +117,69 @@ interface CachedFinding {
 
 interface CachedRecommendation {
   key: string;
-  actionId: string;
-  finding: NormalizedCheckmateFinding;
   title: string;
   analysis: AiFindingAnalysis;
-  actionableChange: ActionableChange;
+  selectionMode: "single" | "applications";
+  actions: Array<{
+    actionId: string;
+    finding: NormalizedCheckmateFinding;
+    actionableChange: ActionableChange;
+  }>;
 }
+
+interface EnvironmentChangePackage {
+  plan: ApiPlan;
+  apiPlanSha256: string;
+  apiValidation: ApiPlanValidationResult;
+  terraformValidation: TerraformValidationResult;
+}
+
+interface SubmittedChangePackage {
+  paths: ChangePackagePaths;
+  dev: EnvironmentChangePackage;
+  prod: EnvironmentChangePackage;
+}
+
+const deterministicApplicationGroups = [
+  {
+    key: "applications-remove-implicit",
+    configPath: "grant_types",
+    title: "Remove the Implicit grant type from",
+    whatItMeans: [
+      "These applications currently allow the Implicit grant type.",
+    ],
+    suggestion: "Remove the Implicit grant type from selected applications.",
+    reason: [
+      "This prevents tokens from being returned directly through the browser flow.",
+      "Other configured grant types remain unchanged.",
+    ],
+  },
+  {
+    key: "applications-use-rs256",
+    configPath: "jwt_configuration.alg",
+    title: "Set JWT signing to RS256",
+    whatItMeans: ["These applications are not using RS256 for JWT signing."],
+    suggestion: "Set JWT signing to RS256 for selected applications.",
+    reason: [
+      "RS256 uses asymmetric signing and keeps verification separate from signing.",
+      "Other JWT settings remain unchanged.",
+    ],
+  },
+  {
+    key: "applications-disable-cross-origin",
+    configPath: "cross_origin_auth",
+    title: "Disable cross-origin authentication for",
+    whatItMeans: [
+      "These applications currently allow cross-origin authentication.",
+    ],
+    suggestion:
+      "Disable cross-origin authentication for selected applications.",
+    reason: [
+      "This removes an unnecessary browser-based authentication surface.",
+      "Cross-origin authentication should be disabled.",
+    ],
+  },
+] as const;
 
 function securityHeaders(response: ServerResponse): void {
   response.setHeader(
@@ -205,8 +283,7 @@ export async function startUiServer(
   let recommendations: CachedRecommendation[] = [];
   const recommendationMap = new Map<string, CachedRecommendation>();
   let triagePromise: Promise<void> | undefined;
-  let submittedYamlPath: string | undefined;
-  let submittedPlan: ApiPlan | undefined;
+  let submittedPackage: SubmittedChangePackage | undefined;
   let execution: ApiExecutionResult | undefined;
   let executing = false;
   let scanning = false;
@@ -263,8 +340,7 @@ export async function startUiServer(
     recommendations = [];
     recommendationMap.clear();
     triagePromise = undefined;
-    submittedYamlPath = undefined;
-    submittedPlan = undefined;
+    submittedPackage = undefined;
     execution = undefined;
     executing = false;
   };
@@ -283,9 +359,40 @@ export async function startUiServer(
     triaged &&
     recommendations.length > 0 &&
     recommendations.every((recommendation) =>
-      session!.decisions.some(
-        (decision) => decision.actionableChangeId === recommendation.actionId,
+      recommendation.actions.every((action) =>
+        session!.decisions.some(
+          (decision) => decision.actionableChangeId === action.actionId,
+        ),
       ),
+    );
+
+  const runApiValidation = async (
+    plan: ApiPlan,
+    config: CheckmateConfig,
+  ): Promise<ApiPlanValidationResult> => {
+    try {
+      return await (dependencies.apiPlanValidator ?? validateApiPlan)(
+        plan,
+        config,
+        { now },
+      );
+    } catch (error) {
+      return {
+        valid: false,
+        profile: config.profile,
+        validatedAt: now().toISOString(),
+        calls: [],
+        error: redactText(toErrorMessage(error), sensitiveValues),
+      };
+    }
+  };
+
+  const runTerraformValidation = (
+    terraformFile: string,
+  ): Promise<TerraformValidationResult> =>
+    (dependencies.terraformValidator ?? validateTerraformConfiguration)(
+      terraformFile,
+      { env, now },
     );
 
   const applyTriage = (
@@ -300,11 +407,50 @@ export async function startUiServer(
         candidate,
       ]),
     );
+    const deterministicActionIds = new Set<string>();
+    for (const group of deterministicApplicationGroups) {
+      const actions = [...actionMap.values()].flatMap((candidate) => {
+        if (
+          candidate.change.resourceType !== "client" ||
+          candidate.change.configPath !== group.configPath
+        ) {
+          return [];
+        }
+        const item = cachedFindings.find(
+          ({ finding }) => finding.id === candidate.findingId,
+        );
+        if (!item) return [];
+        deterministicActionIds.add(candidate.actionId);
+        return [
+          {
+            actionId: candidate.actionId,
+            finding: item.finding,
+            actionableChange: candidate.change,
+          },
+        ];
+      });
+      if (actions.length === 0) continue;
+      const recommendation: CachedRecommendation = {
+        key: group.key,
+        title: group.title,
+        selectionMode: "applications",
+        actions,
+        analysis: {
+          whatItMeans: [...group.whatItMeans],
+          whyItMatters: [...group.reason],
+          questions: [],
+          remediationConsiderations: [group.suggestion],
+        },
+      };
+      recommendations.push(recommendation);
+      recommendationMap.set(recommendation.key, recommendation);
+    }
     for (const selected of items) {
       const actionCandidate = actionMap.get(selected.actionId);
       if (
         !actionCandidate ||
-        actionCandidate.findingId !== selected.findingId
+        actionCandidate.findingId !== selected.findingId ||
+        deterministicActionIds.has(selected.actionId)
       ) {
         continue;
       }
@@ -314,10 +460,15 @@ export async function startUiServer(
       if (!item || recommendationMap.has(selected.actionId)) continue;
       const recommendation: CachedRecommendation = {
         key: selected.actionId,
-        actionId: selected.actionId,
-        finding: item.finding,
         title: selected.recommendationTitle,
-        actionableChange: actionCandidate.change,
+        selectionMode: "single",
+        actions: [
+          {
+            actionId: selected.actionId,
+            finding: item.finding,
+            actionableChange: actionCandidate.change,
+          },
+        ],
         analysis: {
           whatItMeans: selected.whatItMeans,
           whyItMatters: selected.reason,
@@ -336,11 +487,6 @@ export async function startUiServer(
     if (!report || !session) {
       throw new Error("Run a CheckMate scan or load a report first.");
     }
-    if (!provider.triageFindings) {
-      throw new Error(
-        "Report-level AI triage is unavailable for this provider.",
-      );
-    }
     if (!profile) {
       throw new Error(
         "A configured Auth0 profile is required to verify live settings. Start the UI with --profile dev or --profile prod.",
@@ -350,7 +496,29 @@ export async function startUiServer(
       const configuration = await (
         dependencies.configurationLoader ?? loadActionableConfiguration
       )(findings, profile);
-      const items = await provider.triageFindings!(findings, configuration);
+      const aiConfiguration: ActionableConfigurationMap = new Map(
+        [...configuration].flatMap(([findingId, changes]) => {
+          const filtered = changes.filter(
+            (change) =>
+              !(
+                change.resourceType === "client" &&
+                deterministicApplicationGroups.some(
+                  (group) => group.configPath === change.configPath,
+                )
+              ),
+          );
+          return filtered.length > 0 ? [[findingId, filtered]] : [];
+        }),
+      );
+      if (aiConfiguration.size > 0 && !provider.triageFindings) {
+        throw new Error(
+          "Report-level AI triage is unavailable for this provider.",
+        );
+      }
+      const items =
+        aiConfiguration.size > 0
+          ? await provider.triageFindings!(findings, aiConfiguration)
+          : [];
       applyTriage(items, configuration);
     })();
     try {
@@ -379,22 +547,45 @@ export async function startUiServer(
       : {}),
     ...(outputPath ? { outputFile: path.basename(outputPath) } : {}),
     submissionReady: allDecisionsSaved(),
-    submitted: Boolean(submittedYamlPath),
-    ...(submittedYamlPath
-      ? { yamlFile: path.basename(submittedYamlPath) }
-      : {}),
+    submitted: Boolean(submittedPackage),
     canExecute:
-      Boolean(submittedPlan?.calls.length) &&
-      profile?.profile === "dev" &&
+      Boolean(submittedPackage?.dev.plan.calls.length) &&
+      submittedPackage?.dev.apiValidation.valid === true &&
+      submittedPackage?.dev.terraformValidation.valid === true &&
       execution?.status !== "succeeded",
     executing,
-    ...(submittedPlan
+    ...(submittedPackage
       ? {
-          plan: {
-            profile: submittedPlan.profile,
-            generatedAt: submittedPlan.generatedAt,
-            calls: submittedPlan.calls,
-            unchangedActionIds: submittedPlan.unchangedActionIds,
+          changePackage: {
+            directory: path.basename(submittedPackage.paths.directory),
+            dev: {
+              apiFile: path.relative(
+                submittedPackage.paths.directory,
+                submittedPackage.paths.dev.apiPlan,
+              ),
+              terraformFile: path.relative(
+                submittedPackage.paths.directory,
+                submittedPackage.paths.dev.terraform,
+              ),
+              plan: submittedPackage.dev.plan,
+              apiPlanSha256: submittedPackage.dev.apiPlanSha256,
+              apiValidation: submittedPackage.dev.apiValidation,
+              terraformValidation: submittedPackage.dev.terraformValidation,
+            },
+            prod: {
+              apiFile: path.relative(
+                submittedPackage.paths.directory,
+                submittedPackage.paths.prod.apiPlan,
+              ),
+              terraformFile: path.relative(
+                submittedPackage.paths.directory,
+                submittedPackage.paths.prod.terraform,
+              ),
+              plan: submittedPackage.prod.plan,
+              apiPlanSha256: submittedPackage.prod.apiPlanSha256,
+              apiValidation: submittedPackage.prod.apiValidation,
+              terraformValidation: submittedPackage.prod.terraformValidation,
+            },
           },
         }
       : {}),
@@ -402,14 +593,40 @@ export async function startUiServer(
     triaged,
     reportFindingCount: cachedFindings.length,
     progress: {
-      completed: session?.decisions.length ?? 0,
+      completed: recommendations.filter((recommendation) =>
+        recommendation.actions.every((action) =>
+          session?.decisions.some(
+            (decision) => decision.actionableChangeId === action.actionId,
+          ),
+        ),
+      ).length,
       total: recommendations.length,
     },
     findings: recommendations.map((recommendation) => {
-      const { finding, analysis } = recommendation;
-      const saved = session?.decisions.find(
-        (entry) => entry.actionableChangeId === recommendation.actionId,
-      );
+      const { analysis } = recommendation;
+      const finding = recommendation.actions[0]!.finding;
+      const saved = recommendation.actions.flatMap((action) => {
+        const entry = session?.decisions.find(
+          (decision) => decision.actionableChangeId === action.actionId,
+        );
+        return entry ? [entry] : [];
+      });
+      const reviewed = saved.length === recommendation.actions.length;
+      const selectedActionIds = saved
+        .filter((entry) => entry.decision.status === "approved")
+        .flatMap((entry) =>
+          entry.actionableChangeId ? [entry.actionableChangeId] : [],
+        );
+      const decision = reviewed
+        ? selectedActionIds.length === 0
+          ? "accepted_risk"
+          : selectedActionIds.length === recommendation.actions.length
+            ? "approved"
+            : "mixed"
+        : undefined;
+      const adminNote =
+        saved.find((entry) => entry.decision.status === "approved")?.decision
+          .adminNote ?? saved[0]?.decision.adminNote;
       return {
         key: recommendation.key,
         title: redactText(recommendation.title, sensitiveValues),
@@ -419,8 +636,17 @@ export async function startUiServer(
           ? { severity: redactText(finding.severity, sensitiveValues) }
           : {}),
         analysis,
-        actionableChanges: [recommendation.actionableChange],
-        ...(saved ? { decision: saved.decision.status } : {}),
+        selectionMode: recommendation.selectionMode,
+        actionableChanges: recommendation.actions.map((action) => ({
+          actionId: action.actionId,
+          ...action.actionableChange,
+        })),
+        reviewed,
+        selectedActionIds,
+        ...(adminNote
+          ? { adminNote: redactText(adminNote, sensitiveValues) }
+          : {}),
+        ...(decision ? { decision } : {}),
       };
     }),
   });
@@ -478,6 +704,42 @@ export async function startUiServer(
         sendJson(response, 200, state());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/artifact") {
+        if (!submittedPackage) {
+          throw new Error(
+            "Submit the change package before opening its files.",
+          );
+        }
+        const parsed = artifactRequestSchema.parse({
+          profile: url.searchParams.get("profile"),
+          artifact: url.searchParams.get("artifact"),
+          ...(url.searchParams.has("download")
+            ? { download: url.searchParams.get("download") }
+            : {}),
+        });
+        const environment = submittedPackage.paths[parsed.profile];
+        const artifactPath =
+          parsed.artifact === "api"
+            ? environment.apiPlan
+            : environment.terraform;
+        const filename = `${parsed.profile}-${path.basename(artifactPath)}`;
+        const content = await readFile(artifactPath);
+        securityHeaders(response);
+        response.setHeader(
+          "Content-Type",
+          parsed.artifact === "api"
+            ? "application/yaml; charset=utf-8"
+            : "text/plain; charset=utf-8",
+        );
+        if (parsed.download === "1") {
+          response.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${filename}"`,
+          );
+        }
+        response.end(content);
+        return;
+      }
       if (request.method === "POST" && !validOrigin(request)) {
         sendError(response, 403, "The request origin is not allowed.");
         return;
@@ -519,32 +781,65 @@ export async function startUiServer(
         const parsed = decisionRequestSchema.parse(await readBody(request));
         const recommendation = recommendationMap.get(parsed.findingKey);
         if (!recommendation)
-          throw new Error("This action was not selected by AI guidance.");
+          throw new Error("This recommendation is not available.");
+        const availableActionIds = new Set(
+          recommendation.actions.map((action) => action.actionId),
+        );
+        const selectedActionIds =
+          parsed.status === "approved"
+            ? new Set(
+                parsed.selectedActionIds ??
+                  recommendation.actions.map((action) => action.actionId),
+              )
+            : new Set<string>();
+        if (
+          [...selectedActionIds].some(
+            (actionId) => !availableActionIds.has(actionId),
+          )
+        ) {
+          throw new Error(
+            "The selected application is not part of this recommendation.",
+          );
+        }
+        if (parsed.status === "approved" && selectedActionIds.size === 0) {
+          throw new Error(
+            "Select at least one application, or remain unchanged.",
+          );
+        }
         const decidedAt = now().toISOString();
-        const entry = createReviewEntry(
-          recommendation.finding,
-          recommendation.analysis,
-          [],
-          parsed.status,
-          boundedUserText(parsed.rationale, sensitiveValues),
-          decidedAt,
+        const adminNote = boundedUserText(
+          parsed.rationale,
           sensitiveValues,
-          [recommendation.actionableChange],
+        ).trim();
+        session.decisions = session.decisions.filter(
+          (decision) =>
+            !decision.actionableChangeId ||
+            !availableActionIds.has(decision.actionableChangeId),
         );
-        entry.actionableChangeId = recommendation.actionId;
-        const existingIndex = session.decisions.findIndex(
-          (decision) => decision.actionableChangeId === recommendation.actionId,
-        );
-        if (existingIndex >= 0) session.decisions[existingIndex] = entry;
-        else session.decisions.push(entry);
+        for (const action of recommendation.actions) {
+          const selected = selectedActionIds.has(action.actionId);
+          const entry = createReviewEntry(
+            action.finding,
+            recommendation.analysis,
+            [],
+            selected ? "approved" : "accepted_risk",
+            adminNote ||
+              (selected ? "Accepted AI suggestion." : "Remained unchanged."),
+            decidedAt,
+            sensitiveValues,
+            [action.actionableChange],
+          );
+          if (adminNote) entry.decision.adminNote = adminNote;
+          entry.actionableChangeId = action.actionId;
+          session.decisions.push(entry);
+        }
         session.review.lastUpdatedAt = decidedAt;
-        if (session.decisions.length === recommendations.length) {
+        if (allDecisionsSaved()) {
           session.review.completedAt = decidedAt;
         } else {
           delete session.review.completedAt;
         }
-        submittedYamlPath = undefined;
-        submittedPlan = undefined;
+        submittedPackage = undefined;
         execution = undefined;
         delete session.execution;
         await writeReviewSession(outputPath, session);
@@ -561,20 +856,74 @@ export async function startUiServer(
             "Save a decision for every recommendation before submitting.",
           );
         }
-        if (!profile) {
-          throw new Error(
-            "A configured Auth0 profile is required to create the API plan.",
-          );
-        }
-        const yamlPath = createApiPlanOutputPath(outputPath);
-        const plan = buildApiPlan(
+        const devConfig = loadCheckmateConfig("dev", env);
+        const prodConfig = loadCheckmateConfig("prod", env);
+        const configurationLoader =
+          dependencies.configurationLoader ?? loadActionableConfiguration;
+        const [devConfiguration, prodConfiguration] = await Promise.all([
+          configurationLoader(findings, devConfig, undefined, {
+            includeCompliant: true,
+          }),
+          configurationLoader(findings, prodConfig, undefined, {
+            includeCompliant: true,
+          }),
+        ]);
+        const generatedAt = now().toISOString();
+        const devPlan = buildProfileApiPlan(
           session,
-          profile.profile,
-          now().toISOString(),
+          devConfiguration,
+          "dev",
+          generatedAt,
         );
-        await writeApiPlan(yamlPath, plan);
-        submittedYamlPath = yamlPath;
-        submittedPlan = plan;
+        const prodPlan = buildProfileApiPlan(
+          session,
+          prodConfiguration,
+          "prod",
+          generatedAt,
+        );
+        const paths = createChangePackagePaths(outputPath);
+        await Promise.all([
+          writeApiPlan(paths.dev.apiPlan, devPlan),
+          writeApiPlan(paths.prod.apiPlan, prodPlan),
+          writeTextArtifact(
+            paths.dev.terraform,
+            buildTerraformReviewConfiguration(devPlan),
+          ),
+          writeTextArtifact(
+            paths.prod.terraform,
+            buildTerraformReviewConfiguration(prodPlan),
+          ),
+        ]);
+        const [devArtifact, prodArtifact] = await Promise.all([
+          readApiPlan(paths.dev.apiPlan),
+          readApiPlan(paths.prod.apiPlan),
+        ]);
+        const [
+          devApiValidation,
+          prodApiValidation,
+          devTerraformValidation,
+          prodTerraformValidation,
+        ] = await Promise.all([
+          runApiValidation(devArtifact.plan, devConfig),
+          runApiValidation(prodArtifact.plan, prodConfig),
+          runTerraformValidation(paths.dev.terraform),
+          runTerraformValidation(paths.prod.terraform),
+        ]);
+        submittedPackage = {
+          paths,
+          dev: {
+            plan: devArtifact.plan,
+            apiPlanSha256: devArtifact.sha256,
+            apiValidation: devApiValidation,
+            terraformValidation: devTerraformValidation,
+          },
+          prod: {
+            plan: prodArtifact.plan,
+            apiPlanSha256: prodArtifact.sha256,
+            apiValidation: prodApiValidation,
+            terraformValidation: prodTerraformValidation,
+          },
+        };
         execution = undefined;
         delete session.execution;
         sendJson(response, 200, { created: true, state: state() });
@@ -585,12 +934,9 @@ export async function startUiServer(
           throw new Error("Run a CheckMate scan or load a report first.");
         }
         executeRequestSchema.parse(await readBody(request));
-        if (!submittedPlan || !submittedYamlPath) {
-          throw new Error("Submit and review an API plan before executing it.");
-        }
-        if (!profile || profile.profile !== "dev") {
+        if (!submittedPackage) {
           throw new Error(
-            "API execution is restricted to the dev profile. Start the UI with --profile dev.",
+            "Submit and review the change package before executing it.",
           );
         }
         if (executing) {
@@ -599,12 +945,31 @@ export async function startUiServer(
         if (execution?.status === "succeeded") {
           throw new Error("This API plan has already been executed.");
         }
+        const devConfig = loadCheckmateConfig("dev", env);
+        const devArtifact = await readApiPlan(
+          submittedPackage.paths.dev.apiPlan,
+        );
+        if (devArtifact.sha256 !== submittedPackage.dev.apiPlanSha256) {
+          throw new Error(
+            "Execution stopped because dev/api-plan.yml changed after review. Submit the decisions again to create and validate a new plan.",
+          );
+        }
+        const [apiValidation, terraformValidation] = await Promise.all([
+          runApiValidation(devArtifact.plan, devConfig),
+          runTerraformValidation(submittedPackage.paths.dev.terraform),
+        ]);
+        submittedPackage.dev.apiValidation = apiValidation;
+        submittedPackage.dev.terraformValidation = terraformValidation;
+        if (!apiValidation.valid || !terraformValidation.valid) {
+          sendJson(response, 200, { executed: false, state: state() });
+          return;
+        }
         executing = true;
         try {
           try {
             execution = await (dependencies.planExecutor ?? executeApiPlan)(
-              submittedPlan,
-              profile,
+              devArtifact.plan,
+              devConfig,
               { now },
             );
           } catch (error) {
@@ -622,7 +987,11 @@ export async function startUiServer(
           executing = false;
         }
         session.execution = {
-          planFile: path.basename(submittedYamlPath),
+          planFile: path.relative(
+            submittedPackage.paths.directory,
+            submittedPackage.paths.dev.apiPlan,
+          ),
+          planSha256: devArtifact.sha256,
           ...execution,
         };
         session.review.lastUpdatedAt = execution.completedAt;

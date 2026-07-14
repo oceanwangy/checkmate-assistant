@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { CheckmateConfig } from "../config/env.js";
+import type { ProfileName } from "../config/profiles.js";
 import {
   apiPlanSchema,
   type ApiPlan,
   type ApiPlanCall,
 } from "../remediation/api-plan.js";
 import { AppError, toErrorMessage } from "../utils/errors.js";
-import type { Fetcher } from "./application-inventory.js";
+import type { Fetcher } from "./fetcher.js";
 
-const tokenSchema = z.object({ access_token: z.string().min(1) });
+const tokenSchema = z.object({
+  access_token: z.string().min(1),
+  scope: z.string().optional(),
+});
 const recordSchema = z.record(z.unknown());
 
 export interface ApiCallExecution {
@@ -32,6 +36,19 @@ export interface ApiExecutionResult {
 export interface ApiPlanExecutorOptions {
   fetcher?: Fetcher;
   now?: () => Date;
+}
+
+export interface ApiPlanValidationResult {
+  valid: boolean;
+  profile: ProfileName;
+  validatedAt: string;
+  calls: Array<{
+    id: string;
+    endpoint: string;
+    status: "ready" | "already_applied" | "invalid";
+    error?: string;
+  }>;
+  error?: string;
 }
 
 function tenantBaseUrl(domain: string): string {
@@ -60,9 +77,35 @@ async function responseJson(
   label: string,
 ): Promise<unknown> {
   if (!response.ok) {
+    let detail = "";
+    try {
+      const text = await response.text();
+      if (text) {
+        try {
+          const parsed = JSON.parse(text) as unknown;
+          if (parsed !== null && typeof parsed === "object") {
+            const body = parsed as Record<string, unknown>;
+            const messages = [
+              body.message,
+              body.error_description,
+              body.error,
+            ].filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim().length > 0,
+            );
+            detail = [...new Set(messages)].join(" — ");
+          }
+        } catch {
+          detail = text;
+        }
+      }
+    } catch {
+      // Retain the status-only error when Auth0 does not return a readable body.
+    }
+    const safeDetail = detail.replace(/\s+/g, " ").trim().slice(0, 500);
     throw new AppError(
       "AUTH0_WRITE_FAILED",
-      `${label} failed with status ${response.status}.`,
+      `${label} failed with status ${response.status}${safeDetail ? `: ${safeDetail}` : ""}.`,
     );
   }
   try {
@@ -142,6 +185,50 @@ function mergeRecords(
   return target;
 }
 
+function removeNullLiveValues(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(removeNullLiveValues);
+  }
+  if (value !== null && typeof value === "object") {
+    const cleaned: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      safeSegments(key);
+      if (nested !== null && nested !== undefined) {
+        cleaned[key] = removeNullLiveValues(nested);
+      }
+    }
+    return cleaned;
+  }
+  return value;
+}
+
+function assertJsonPayload(value: unknown, path = "body"): void {
+  if (
+    value === undefined ||
+    typeof value === "bigint" ||
+    typeof value === "function" ||
+    typeof value === "symbol" ||
+    (typeof value === "number" && !Number.isFinite(value))
+  ) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `The API plan produced an invalid PATCH value at ${path}.`,
+    );
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      assertJsonPayload(item, `${path}[${index}]`),
+    );
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, nested] of Object.entries(value)) {
+      safeSegments(key);
+      assertJsonPayload(nested, `${path}.${key}`);
+    }
+  }
+}
+
 function targetValue(call: ApiPlanCall, path: string): unknown {
   const target = valueAt(call.body, path);
   if (target === undefined) {
@@ -197,19 +284,26 @@ function requestBody(
         body[key] = structuredClone(planned);
       }
     }
+    assertJsonPayload(body);
     return body;
   }
-  const liveOptions = record(live.options, "connection options");
+  const liveOptions = record(
+    removeNullLiveValues(live.options),
+    "connection options",
+  );
   const plannedOptions = record(
     call.body.options,
     "planned connection options",
   );
-  return {
+  const body = {
     options: mergeRecords(cloneRecord(liveOptions), plannedOptions),
   };
+  assertJsonPayload(body);
+  return body;
 }
 
 function scopesFor(plan: ApiPlan): string[] {
+  const client = plan.calls.some((call) => call.resourceType === "client");
   const connection = plan.calls.some(
     (call) => call.resourceType === "connection",
   );
@@ -217,6 +311,7 @@ function scopesFor(plan: ApiPlan): string[] {
     (call) => call.resourceType === "attack_protection",
   );
   return [
+    ...(client ? ["read:clients", "update:clients"] : []),
     ...(connection
       ? [
           "read:connections",
@@ -227,6 +322,53 @@ function scopesFor(plan: ApiPlan): string[] {
       : []),
     ...(attack ? ["read:attack_protection", "update:attack_protection"] : []),
   ];
+}
+
+async function managementAuthorization(
+  fetcher: Fetcher,
+  baseUrl: string,
+  config: CheckmateConfig,
+  scopes: string[],
+  purpose: "validation" | "execution",
+): Promise<string> {
+  const response = await fetcher(`${baseUrl}/oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "client_credentials",
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      audience: `${baseUrl}/api/v2/`,
+      scope: scopes.join(" "),
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `Auth0 could not grant the required ${purpose} scopes (${scopes.join(", ")}) for ${config.profile}.`,
+    );
+  }
+  const token = tokenSchema.safeParse(
+    await responseJson(response, `Auth0 ${purpose} token request`),
+  );
+  if (!token.success) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `Auth0 returned an invalid ${purpose} access token.`,
+    );
+  }
+  if (token.data.scope !== undefined) {
+    const granted = new Set(token.data.scope.split(/\s+/).filter(Boolean));
+    const missing = scopes.filter((scope) => !granted.has(scope));
+    if (missing.length > 0) {
+      throw new AppError(
+        "AUTH0_WRITE_FAILED",
+        `Auth0 ${purpose} is missing required scopes (${missing.join(", ")}) for ${config.profile}.`,
+      );
+    }
+  }
+  return `Bearer ${token.data.access_token}`;
 }
 
 async function readLiveResource(
@@ -248,6 +390,81 @@ async function readLiveResource(
     await responseJson(response, `Auth0 read for ${call.resourceName}`),
     call.resourceName,
   );
+}
+
+export async function validateApiPlan(
+  untrustedPlan: ApiPlan,
+  config: CheckmateConfig,
+  options: ApiPlanExecutorOptions = {},
+): Promise<ApiPlanValidationResult> {
+  const plan = apiPlanSchema.parse(untrustedPlan);
+  if (plan.profile !== config.profile) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `The ${plan.profile} API plan cannot be validated against the ${config.profile} profile.`,
+    );
+  }
+  const fetcher = options.fetcher ?? fetch;
+  const now = options.now ?? (() => new Date());
+  const validatedAt = now().toISOString();
+  const baseUrl = tenantBaseUrl(config.domain);
+  const scopes = scopesFor(plan);
+  if (scopes.length === 0) {
+    return {
+      valid: true,
+      profile: config.profile,
+      validatedAt,
+      calls: [],
+    };
+  }
+  const authorization = await managementAuthorization(
+    fetcher,
+    baseUrl,
+    config,
+    scopes,
+    "validation",
+  );
+  const calls: ApiPlanValidationResult["calls"] = [];
+  for (const call of plan.calls) {
+    try {
+      const live = await readLiveResource(
+        fetcher,
+        baseUrl,
+        call,
+        authorization,
+      );
+      const status = classifyLiveState(call, live);
+      if (status === "safe_to_apply") {
+        requestBody(call, live);
+      }
+      calls.push({
+        id: call.id,
+        endpoint: call.endpoint,
+        status: status === "target" ? "already_applied" : "ready",
+      });
+    } catch (error) {
+      const message = toErrorMessage(error);
+      calls.push({
+        id: call.id,
+        endpoint: call.endpoint,
+        status: "invalid",
+        error: message,
+      });
+      return {
+        valid: false,
+        profile: config.profile,
+        validatedAt,
+        calls,
+        error: message,
+      };
+    }
+  }
+  return {
+    valid: true,
+    profile: config.profile,
+    validatedAt,
+    calls,
+  };
 }
 
 export async function executeApiPlan(
@@ -277,34 +494,13 @@ export async function executeApiPlan(
     };
   }
 
-  const tokenResponse = await fetcher(`${baseUrl}/oauth/token`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "client_credentials",
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      audience: `${baseUrl}/api/v2/`,
-      scope: scopes.join(" "),
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!tokenResponse.ok) {
-    throw new AppError(
-      "AUTH0_WRITE_FAILED",
-      `Auth0 could not grant the required execution scopes (${scopes.join(", ")}). Add them to the dev CheckMate M2M application and try again.`,
-    );
-  }
-  const token = tokenSchema.safeParse(
-    await responseJson(tokenResponse, "Auth0 execution token request"),
+  const authorization = await managementAuthorization(
+    fetcher,
+    baseUrl,
+    config,
+    scopes,
+    "execution",
   );
-  if (!token.success) {
-    throw new AppError(
-      "AUTH0_WRITE_FAILED",
-      "Auth0 returned an invalid execution access token.",
-    );
-  }
-  const authorization = `Bearer ${token.data.access_token}`;
   const calls: ApiCallExecution[] = [];
 
   for (const call of plan.calls) {

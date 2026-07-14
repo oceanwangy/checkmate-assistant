@@ -4,7 +4,6 @@ import type { FindingStatusFilter } from "../findings/filter.js";
 import { displayPath } from "../utils/filesystem.js";
 
 interface UiOptions {
-  report?: string;
   status: FindingStatusFilter;
   port: number;
   profile?: string;
@@ -21,11 +20,7 @@ function portNumber(value: string): number {
 export function registerUiCommand(program: Command): void {
   program
     .command("ui")
-    .description("Review CheckMate findings in a local browser interface")
-    .option(
-      "--report <report>",
-      "path to an existing CheckMate JSON report (optional)",
-    )
+    .description("Run CheckMate and review findings in a local interface")
     .addOption(
       new Option(
         "--profile <profile>",

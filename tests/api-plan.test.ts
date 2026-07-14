@@ -5,7 +5,7 @@ import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { buildApiPlan, apiPlanSchema } from "../src/remediation/api-plan.js";
 import {
-  createApiPlanOutputPath,
+  readApiPlan,
   writeApiPlan,
 } from "../src/remediation/api-plan-writer.js";
 import type { ReviewSession } from "../src/remediation/review-schema.js";
@@ -130,16 +130,56 @@ describe("Auth0 API plan", () => {
 
   it("writes a validated .yml file", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-plan-"));
-    const outputPath = createApiPlanOutputPath(
-      path.join(directory, "review.json"),
-    );
+    const outputPath = path.join(directory, "api-plan.yml");
     const plan = buildApiPlan(session(), "dev", "2026-07-10T10:06:00.000Z");
 
     await writeApiPlan(outputPath, plan);
 
-    expect(outputPath).toMatch(/\.api-plan\.yml$/);
     expect(
       apiPlanSchema.parse(parse(await readFile(outputPath, "utf8"))),
     ).toEqual(plan);
+    const artifact = await readApiPlan(outputPath);
+    expect(artifact.plan).toEqual(plan);
+    expect(artifact.sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("creates a partial client PATCH for application settings", () => {
+    const review = session();
+    review.decisions = [
+      {
+        checkmateFindingId: "implicit-grant",
+        checkmateTitle: "Application grant types",
+        checkmateStatus: "failed",
+        analysis,
+        answers: [],
+        actionableChangeId: "action-implicit",
+        actionableChanges: [
+          {
+            resourceType: "client",
+            resourceId: "client_12345678",
+            resourceName: "Test App",
+            configPath: "grant_types",
+            currentValue: ["authorization_code", "implicit", "refresh_token"],
+            targetValue: ["authorization_code", "refresh_token"],
+          },
+        ],
+        decision: {
+          status: "approved",
+          rationale: "Remove the deprecated flow.",
+          decidedAt: "2026-07-10T10:05:00.000Z",
+        },
+      },
+    ];
+
+    const plan = buildApiPlan(review, "dev", "2026-07-10T10:06:00.000Z");
+
+    expect(plan.calls).toEqual([
+      expect.objectContaining({
+        endpoint: "/api/v2/clients/client_12345678",
+        resourceType: "client",
+        bodyStrategy: "merge_live_nested_objects",
+        body: { grant_types: ["authorization_code", "refresh_token"] },
+      }),
+    ]);
   });
 });

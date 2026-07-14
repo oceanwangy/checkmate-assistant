@@ -1,12 +1,44 @@
-import { rename, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { apiPlanSchema, type ApiPlan } from "./api-plan.js";
 import { ensureDirectory } from "../utils/filesystem.js";
 import { AppError } from "../utils/errors.js";
 
-export function createApiPlanOutputPath(reviewOutputPath: string): string {
-  return reviewOutputPath.replace(/\.json$/i, ".api-plan.yml");
+function apiPlanSha256(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function parseApiPlan(content: string): ApiPlan {
+  try {
+    return apiPlanSchema.parse(parse(content) as unknown);
+  } catch (error) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      "The saved API plan is invalid and cannot be executed.",
+      { cause: error },
+    );
+  }
+}
+
+export async function readApiPlan(
+  inputPath: string,
+): Promise<{ plan: ApiPlan; sha256: string }> {
+  let content: string;
+  try {
+    content = await readFile(inputPath, "utf8");
+  } catch (error) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `Unable to read the saved API plan: ${inputPath}`,
+      { cause: error },
+    );
+  }
+  return {
+    plan: parseApiPlan(content),
+    sha256: apiPlanSha256(content),
+  };
 }
 
 export async function writeApiPlan(

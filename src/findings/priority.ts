@@ -10,6 +10,8 @@ const OBVIOUS_HARDENING_PATTERNS = [
   /token (lifetime|expiration|expiry)/,
   /(signing|encryption) algorithm/,
   /\b(alg|hs256|rs256)\b/,
+  /cross[- ]origin authentication/,
+  /implicit grant/,
   /breached password/,
   /brute[- ]force/,
   /password policy/,

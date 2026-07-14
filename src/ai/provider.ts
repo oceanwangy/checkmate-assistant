@@ -45,7 +45,7 @@ export const aiReportTriageItemSchema = z
   .strict();
 
 export const aiReportTriageSchema = z
-  .object({ selectedFindings: z.array(aiReportTriageItemSchema).max(12) })
+  .object({ selectedFindings: z.array(aiReportTriageItemSchema).max(40) })
   .strict();
 
 export type AiReportTriageItem = z.infer<typeof aiReportTriageItemSchema>;

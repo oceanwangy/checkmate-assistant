@@ -27,6 +27,7 @@ export const reviewEntrySchema = z.object({
   decision: z.object({
     status: remediationDecisionStatusSchema,
     rationale: z.string().min(1).max(4_000),
+    adminNote: z.string().min(1).max(4_000).optional(),
     decidedAt: z.string().datetime(),
   }),
 });
@@ -56,6 +57,10 @@ export const reviewSessionSchema = z.object({
   execution: z
     .object({
       planFile: z.string().min(1),
+      planSha256: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
       status: z.enum(["succeeded", "failed"]),
       startedAt: z.string().datetime(),
       completedAt: z.string().datetime(),

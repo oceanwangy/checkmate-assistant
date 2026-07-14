@@ -6,7 +6,7 @@ const apiCallSchema = z.object({
   id: z.string().min(1),
   method: z.literal("PATCH"),
   endpoint: z.string().startsWith("/api/v2/"),
-  resourceType: z.enum(["connection", "attack_protection"]),
+  resourceType: z.enum(["connection", "attack_protection", "client"]),
   resourceId: z.string().min(1),
   resourceName: z.string().min(1),
   bodyStrategy: z.enum([
@@ -27,12 +27,16 @@ export const apiPlanSchema = z.object({
   profile: z.enum(["dev", "prod"]),
   calls: z.array(apiCallSchema),
   unchangedActionIds: z.array(z.string().min(1)),
+  alreadyCompliantActionIds: z.array(z.string().min(1)),
 });
 
 export type ApiPlan = z.infer<typeof apiPlanSchema>;
 export type ApiPlanCall = z.infer<typeof apiCallSchema>;
 
 function endpointFor(change: ActionableChange): string {
+  if (change.resourceType === "client") {
+    return `/api/v2/clients/${encodeURIComponent(change.resourceId)}`;
+  }
   if (change.resourceType === "connection") {
     return `/api/v2/connections/${encodeURIComponent(change.resourceId)}`;
   }
@@ -151,5 +155,6 @@ export function buildApiPlan(
     profile,
     calls,
     unchangedActionIds,
+    alreadyCompliantActionIds: [],
   });
 }

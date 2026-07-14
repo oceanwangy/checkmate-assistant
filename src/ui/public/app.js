@@ -171,6 +171,62 @@ function closePlanReview() {
   byId("plan-modal-overlay")?.remove();
 }
 
+function artifactUrl(profile, artifact, download = false) {
+  const parameters = new URLSearchParams({ profile, artifact });
+  if (download) parameters.set("download", "1");
+  return `/api/artifact?${parameters.toString()}`;
+}
+
+function closeArtifactPreview() {
+  byId("artifact-modal-overlay")?.remove();
+}
+
+async function openArtifactPreview(profile, artifact, filename) {
+  try {
+    const response = await fetch(artifactUrl(profile, artifact));
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || "The generated file could not be opened.");
+    }
+    const content = await response.text();
+    closeArtifactPreview();
+    const overlay = node("div", "modal-overlay artifact-modal-overlay");
+    overlay.id = "artifact-modal-overlay";
+    const modal = node("section", "artifact-modal");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-labelledby", "artifact-modal-title");
+    const header = node("header", "artifact-modal-header");
+    const title = node("div");
+    title.append(
+      node("div", "eyebrow", `${profile} generated output`),
+      node("h2", "", filename),
+    );
+    title.querySelector("h2").id = "artifact-modal-title";
+    const actions = node("div", "artifact-modal-actions");
+    const download = node("a", "artifact-download-button", "Download");
+    download.href = artifactUrl(profile, artifact, true);
+    download.setAttribute("download", "");
+    const close = node("button", "modal-close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close file preview");
+    close.addEventListener("click", closeArtifactPreview);
+    actions.append(download, close);
+    header.append(title, actions);
+    const preview = node("pre", "artifact-preview");
+    preview.append(node("code", "", content));
+    modal.append(header, preview);
+    overlay.append(modal);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) closeArtifactPreview();
+    });
+    document.body.append(overlay);
+    close.focus();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 function executionSummary(parent) {
   if (!ui.state.execution) return;
   const result = node(
@@ -207,8 +263,8 @@ function executionSummary(parent) {
 
 function openPlanReview() {
   closePlanReview();
-  const plan = ui.state.plan;
-  if (!plan) return;
+  const changePackage = ui.state.changePackage;
+  if (!changePackage) return;
   const overlay = node("div", "modal-overlay");
   overlay.id = "plan-modal-overlay";
   const modal = node("section", "plan-modal");
@@ -218,12 +274,12 @@ function openPlanReview() {
   const header = node("header", "plan-modal-header");
   const heading = node("div");
   heading.append(
-    node("div", "eyebrow", "YAML API plan"),
-    node("h2", "", "Review changes before execution"),
+    node("div", "eyebrow", "Dual-environment change package"),
+    node("h2", "", "Review generated outputs"),
     node(
       "p",
       "",
-      `${plan.calls.length} PATCH ${plan.calls.length === 1 ? "call" : "calls"} for the ${plan.profile} profile.`,
+      "Terraform was validated and the Management API preflight passed separately for development and production.",
     ),
   );
   heading.querySelector("h2").id = "plan-modal-title";
@@ -234,67 +290,137 @@ function openPlanReview() {
   header.append(heading, close);
   modal.append(header);
 
-  const calls = node("div", "plan-calls");
-  if (!plan.calls.length) {
-    calls.append(
+  const environments = node("div", "plan-calls environment-plans");
+  for (const profile of ["dev", "prod"]) {
+    const artifact = changePackage[profile];
+    const section = node("section", "environment-plan");
+    const environmentHeader = node("div", "environment-plan-header");
+    const title = node("div");
+    title.append(
+      node("span", "environment-name", profile),
       node(
-        "p",
-        "empty-plan",
-        "There are no accepted changes. No API calls will be made.",
+        "h3",
+        "",
+        profile === "dev" ? "Development tenant" : "Production tenant",
       ),
     );
-  }
-  for (const call of plan.calls) {
-    const card = node("article", "plan-call");
-    const callTop = node("div", "plan-call-top");
-    callTop.append(
-      node("span", "method", call.method),
-      node("code", "endpoint", call.endpoint),
-    );
-    card.append(callTop, node("h3", "", call.resourceName));
-    const changes = node("div", "plan-changes");
-    for (const precondition of call.preconditions) {
-      const change = node("div", "plan-change");
-      change.append(
-        node("code", "", precondition.path),
-        node(
-          "span",
-          "",
-          `${displayValue(precondition.expectedValue)} → ${displayValue(valueAt(call.body, precondition.path))}`,
-        ),
-      );
-      changes.append(change);
-    }
-    card.append(changes);
-    if (call.bodyStrategy === "merge_live_connection_options") {
-      card.append(
-        node(
-          "p",
-          "merge-note",
-          "At execution, these changes are merged into the latest full connection options so existing settings are preserved.",
-        ),
-      );
-    } else if (call.bodyStrategy === "merge_live_nested_objects") {
-      card.append(
-        node(
-          "p",
-          "merge-note",
-          "Nested settings are merged with the latest live values so unselected settings are preserved.",
-        ),
-      );
-    }
-    calls.append(card);
-  }
-  modal.append(calls);
-  if (plan.unchangedActionIds.length) {
-    modal.append(
+    const validations = node("div", "validation-badges");
+    validations.append(
       node(
-        "p",
-        "unchanged-count",
-        `${plan.unchangedActionIds.length} unchanged ${plan.unchangedActionIds.length === 1 ? "item is" : "items are"} excluded from the API calls.`,
+        "span",
+        `validation-badge ${artifact.terraformValidation.valid ? "valid" : "invalid"}`,
+        `Terraform ${artifact.terraformValidation.valid ? "validated" : "invalid"}`,
+      ),
+      node(
+        "span",
+        `validation-badge ${artifact.apiValidation.valid ? "valid" : "invalid"}`,
+        `API preflight ${artifact.apiValidation.valid ? "passed" : "failed"}`,
       ),
     );
+    environmentHeader.append(title, validations);
+    section.append(environmentHeader);
+    const files = node("div", "artifact-files");
+    for (const [kind, filename] of [
+      ["terraform", artifact.terraformFile],
+      ["api", artifact.apiFile],
+    ]) {
+      const row = node("div", "artifact-file");
+      const view = node("button", "artifact-view-button", "View");
+      view.type = "button";
+      view.addEventListener("click", () =>
+        openArtifactPreview(profile, kind, filename),
+      );
+      const download = node("a", "artifact-download-link", "Download");
+      download.href = artifactUrl(profile, kind, true);
+      download.setAttribute("download", "");
+      const actions = node("div", "artifact-file-actions");
+      actions.append(view, download);
+      row.append(node("code", "", filename), actions);
+      files.append(row);
+    }
+    section.append(files);
+    section.append(
+      node(
+        "p",
+        "artifact-digest",
+        `API plan SHA-256: ${artifact.apiPlanSha256}`,
+      ),
+    );
+    if (artifact.terraformValidation.error) {
+      section.append(
+        node(
+          "p",
+          "validation-error",
+          `Terraform: ${artifact.terraformValidation.error}`,
+        ),
+      );
+    }
+    if (artifact.apiValidation.error) {
+      section.append(
+        node(
+          "p",
+          "validation-error",
+          `API plan: ${artifact.apiValidation.error}`,
+        ),
+      );
+    }
+    if (!artifact.plan.calls.length) {
+      section.append(
+        node(
+          "p",
+          "empty-plan",
+          "No API calls are required for this environment.",
+        ),
+      );
+    }
+    for (const call of artifact.plan.calls) {
+      const card = node("article", "plan-call");
+      const callTop = node("div", "plan-call-top");
+      callTop.append(
+        node("span", "method", call.method),
+        node("code", "endpoint", call.endpoint),
+      );
+      card.append(callTop, node("h3", "", call.resourceName));
+      const changes = node("div", "plan-changes");
+      for (const precondition of call.preconditions) {
+        const change = node("div", "plan-change");
+        change.append(
+          node("code", "", precondition.path),
+          node(
+            "span",
+            "",
+            `${displayValue(precondition.expectedValue)} → ${displayValue(valueAt(call.body, precondition.path))}`,
+          ),
+        );
+        changes.append(change);
+      }
+      card.append(changes);
+      section.append(card);
+    }
+    const excluded =
+      artifact.plan.unchangedActionIds.length +
+      artifact.plan.alreadyCompliantActionIds.length;
+    if (excluded) {
+      section.append(
+        node(
+          "p",
+          "unchanged-count",
+          `${artifact.plan.unchangedActionIds.length} left unchanged; ${artifact.plan.alreadyCompliantActionIds.length} already compliant.`,
+        ),
+      );
+    }
+    if (profile === "prod") {
+      section.append(
+        node(
+          "p",
+          "production-note",
+          "Production outputs are for the formal change process. This POC cannot execute them.",
+        ),
+      );
+    }
+    environments.append(section);
   }
+  modal.append(environments);
   executionSummary(modal);
 
   const footer = node("footer", "plan-modal-footer");
@@ -343,12 +469,15 @@ function openPlanReview() {
       }
     });
     footer.append(confirmation, execute);
-  } else if (plan.calls.length && ui.state.execution?.status !== "succeeded") {
+  } else if (
+    changePackage.dev.plan.calls.length &&
+    ui.state.execution?.status !== "succeeded"
+  ) {
     footer.append(
       node(
         "p",
         "execution-unavailable",
-        "Execution is available only when the UI is started with the dev profile.",
+        "Dev execution is blocked until Terraform validation and the API preflight pass.",
       ),
     );
   }
@@ -361,14 +490,23 @@ function openPlanReview() {
   close.focus();
 }
 
-function renderDecisionOptions(finding) {
+function renderDecisionOptions(
+  finding,
+  adminNotes,
+  applicationCheckboxes = [],
+) {
   const options = node("div", "decision-options");
-  const accepted = finding.decision === "approved";
+  const accepted =
+    finding.decision === "approved" || finding.decision === "mixed";
   const unchangedSelected = finding.decision === "accepted_risk";
   const accept = node(
     "button",
     `decision accept${accepted ? " selected" : ""}`,
-    accepted ? "✓ AI suggestion accepted" : "Accept AI suggestion",
+    accepted
+      ? "✓ Selection saved"
+      : finding.selectionMode === "applications"
+        ? "Accept for selected applications"
+        : "Accept AI suggestion",
   );
   const unchanged = node(
     "button",
@@ -377,30 +515,41 @@ function renderDecisionOptions(finding) {
   );
   accept.type = "button";
   unchanged.type = "button";
-  accept.addEventListener("click", () =>
+  accept.addEventListener("click", () => {
+    const rationale = adminNotes.value.trim();
+    const selectedActionIds = applicationCheckboxes.length
+      ? applicationCheckboxes
+          .filter((checkbox) => checkbox.checked)
+          .map((checkbox) => checkbox.value)
+      : finding.actionableChanges.map((change) => change.actionId);
+    if (selectedActionIds.length === 0) {
+      toast("Select at least one application, or remain unchanged.", true);
+      return;
+    }
     saveDecision(
       finding,
       "approved",
-      `Accepted AI suggestion: ${finding.analysis.remediationConsiderations.join(" ")}`,
+      rationale,
       [accept, unchanged],
-    ),
-  );
-  unchanged.addEventListener("click", () =>
-    saveDecision(
-      finding,
-      "accepted_risk",
-      "Reviewer selected remain unchanged.",
-      [accept, unchanged],
-    ),
-  );
+      selectedActionIds,
+    );
+  });
+  unchanged.addEventListener("click", () => {
+    const rationale = adminNotes.value.trim();
+    saveDecision(finding, "accepted_risk", rationale, [accept, unchanged], []);
+  });
   options.append(accept, unchanged);
   return options;
 }
 
 function createFindingCard(finding, index) {
+  const displayTitle =
+    finding.key === "applications-use-rs256"
+      ? finding.title.replace(/\s+for$/, "")
+      : finding.title;
   const card = node(
     "article",
-    `finding-card${finding.decision ? " reviewed" : ""}`,
+    `finding-card${finding.reviewed ? " reviewed" : ""}`,
   );
   card.dataset.findingKey = finding.key;
   const top = node("div", "finding-top");
@@ -414,36 +563,91 @@ function createFindingCard(finding, index) {
       ),
     );
   }
-  if (finding.decision) top.append(node("span", "saved", "Decision saved"));
-  card.append(top, node("h2", "validator-title", finding.title));
-  if (finding.validatorTitle && finding.validatorTitle !== finding.title) {
+  if (finding.reviewed) top.append(node("span", "saved", "Decision saved"));
+  card.append(top, node("h2", "validator-title", displayTitle));
+  if (finding.validatorTitle && finding.validatorTitle !== displayTitle) {
     card.append(node("p", "validator-context", finding.validatorTitle));
   }
 
   const suggestion = node("section", "suggestion");
-  suggestion.append(node("h3", "", "AI-suggested changes"));
+  suggestion.append(
+    node(
+      "h3",
+      "",
+      finding.selectionMode === "applications"
+        ? "Recommended security change"
+        : "AI-suggested changes",
+    ),
+  );
   addBulletList(suggestion, finding.analysis.remediationConsiderations);
   const reason = node("div", "reason");
   reason.append(node("strong", "", "Why this matters"));
   addBulletList(reason, finding.analysis.whyItMatters);
   suggestion.append(reason);
-  const exact = node("div", "exact-changes");
-  exact.append(node("strong", "", "Exact configuration changes"));
-  for (const change of finding.actionableChanges) {
-    const item = node("div", "exact-change");
-    item.append(
-      node("span", "change-resource", change.resourceName),
-      node("code", "change-path", change.configPath),
-      node(
-        "span",
-        "change-values",
-        `${JSON.stringify(change.currentValue)} → ${JSON.stringify(change.targetValue)}`,
-      ),
-    );
-    exact.append(item);
+  const applicationCheckboxes = [];
+  if (finding.selectionMode === "applications") {
+    const applications = node("fieldset", "application-selection");
+    if (finding.actionableChanges.length > 3) {
+      applications.classList.add("scrollable");
+    }
+    applications.append(node("legend", "", "Select applications"));
+    const selected = new Set(finding.selectedActionIds || []);
+    for (const change of [...finding.actionableChanges].sort((left, right) =>
+      left.resourceName.localeCompare(right.resourceName),
+    )) {
+      const label = node("label", "application-option");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = change.actionId;
+      checkbox.checked = finding.reviewed
+        ? selected.has(change.actionId)
+        : true;
+      applicationCheckboxes.push(checkbox);
+      const text = node("span", "application-option-text");
+      text.append(
+        node("strong", "", change.resourceName),
+        node(
+          "small",
+          "",
+          `${displayValue(change.currentValue)} → ${displayValue(change.targetValue)}`,
+        ),
+      );
+      label.append(checkbox, text);
+      applications.append(label);
+    }
+    suggestion.append(applications);
+  } else {
+    const exact = node("div", "exact-changes");
+    exact.append(node("strong", "", "Exact configuration changes"));
+    for (const change of finding.actionableChanges) {
+      const item = node("div", "exact-change");
+      item.append(
+        node("span", "change-resource", change.resourceName),
+        node("code", "change-path", change.configPath),
+        node(
+          "span",
+          "change-values",
+          `${JSON.stringify(change.currentValue)} → ${JSON.stringify(change.targetValue)}`,
+        ),
+      );
+      exact.append(item);
+    }
+    suggestion.append(exact);
   }
-  suggestion.append(exact);
-  card.append(suggestion, renderDecisionOptions(finding));
+  const notes = node("label", "admin-notes");
+  notes.append(node("strong", "", "Admin notes"));
+  const adminNotes = document.createElement("textarea");
+  adminNotes.className = "admin-notes-input";
+  adminNotes.maxLength = 4_000;
+  adminNotes.rows = 3;
+  adminNotes.placeholder = "Add context for this decision.";
+  adminNotes.value = finding.adminNote || "";
+  notes.append(adminNotes);
+  card.append(
+    suggestion,
+    notes,
+    renderDecisionOptions(finding, adminNotes, applicationCheckboxes),
+  );
   return card;
 }
 
@@ -463,7 +667,20 @@ function renderSubmission() {
   const panel = node("section", "submission-panel");
   panel.id = "submission";
   if (!ui.state.submissionReady) {
-    panel.hidden = true;
+    const remaining = ui.state.progress.total - ui.state.progress.completed;
+    panel.append(
+      node("div", "eyebrow", "Submit change decisions"),
+      node("h2", "", "Create the change package"),
+      node(
+        "p",
+        "",
+        `${ui.state.progress.completed} of ${ui.state.progress.total} recommendations reviewed. Save ${remaining} more ${remaining === 1 ? "decision" : "decisions"} to enable Submit.`,
+      ),
+    );
+    const submit = node("button", "submit-button", "Submit");
+    submit.type = "button";
+    submit.disabled = true;
+    panel.append(submit);
     current.replaceWith(panel);
     return;
   }
@@ -476,18 +693,22 @@ function renderSubmission() {
         "",
         ui.state.execution?.status === "succeeded"
           ? "Changes executed"
-          : "YAML API plan created",
+          : "Change package created",
       ),
       node(
         "p",
         "",
         ui.state.execution?.status === "succeeded"
           ? "The accepted Auth0 changes were applied and verified against the dev tenant."
-          : "Only accepted suggestions are included. Review the plan before executing any Auth0 changes.",
+          : "Terraform and API outputs were generated for development and production. Review their validation results before dev execution.",
       ),
-      node("code", "yaml-file", ui.state.yamlFile),
+      node("code", "yaml-file", ui.state.changePackage.directory),
     );
-    const review = node("button", "review-plan-button", "Review API plan");
+    const review = node(
+      "button",
+      "review-plan-button",
+      "Review change package",
+    );
     review.type = "button";
     review.addEventListener("click", openPlanReview);
     panel.append(review);
@@ -496,18 +717,18 @@ function renderSubmission() {
   }
   panel.append(
     node("div", "eyebrow", "All decisions saved"),
-    node("h2", "", "Create the API plan"),
+    node("h2", "", "Create the change package"),
     node(
       "p",
       "",
-      "Submit your decisions to create a YAML file containing the accepted Auth0 API changes.",
+      "Submit your decisions to generate Terraform and preflight-checked API plans for development and production.",
     ),
   );
   const submit = node("button", "submit-button", "Submit");
   submit.type = "button";
   submit.addEventListener("click", async () => {
     submit.disabled = true;
-    submit.textContent = "Creating YAML…";
+    submit.textContent = "Generating and validating…";
     try {
       ui.state = await api("/api/submit", {
         method: "POST",
@@ -515,7 +736,7 @@ function renderSubmission() {
       }).then((result) => result.state);
       renderSubmission();
       openPlanReview();
-      toast("YAML API plan created.");
+      toast("Development and production change outputs created.");
     } catch (error) {
       submit.disabled = false;
       submit.textContent = "Submit";
@@ -606,12 +827,23 @@ async function runTriage() {
   }
 }
 
-async function saveDecision(finding, status, rationale, buttons) {
+async function saveDecision(
+  finding,
+  status,
+  rationale,
+  buttons,
+  selectedActionIds,
+) {
   for (const button of buttons) button.disabled = true;
   try {
     ui.state = await api("/api/decision", {
       method: "POST",
-      body: JSON.stringify({ findingKey: finding.key, status, rationale }),
+      body: JSON.stringify({
+        findingKey: finding.key,
+        status,
+        rationale,
+        selectedActionIds,
+      }),
     }).then((result) => result.state);
     renderProgress();
     replaceCard(finding.key);

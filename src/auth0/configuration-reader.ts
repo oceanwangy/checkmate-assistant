@@ -6,7 +6,7 @@ import type {
   ConfigurationValue,
 } from "../remediation/actionable-change.js";
 import { AppError } from "../utils/errors.js";
-import type { Fetcher } from "./application-inventory.js";
+import type { Fetcher } from "./fetcher.js";
 
 const tokenSchema = z.object({ access_token: z.string().min(1) });
 const connectionSchema = z
@@ -18,7 +18,34 @@ const connectionSchema = z
   })
   .passthrough();
 const connectionsSchema = z.array(connectionSchema);
+const clientSchema = z
+  .object({
+    client_id: z.string().min(1),
+    name: z.string().min(1),
+    app_type: z.string().optional(),
+    is_first_party: z.boolean().optional(),
+    jwt_configuration: z.record(z.unknown()).optional(),
+    cross_origin_auth: z.boolean().optional(),
+    cross_origin_authentication: z.boolean().optional(),
+    grant_types: z.array(z.string()).optional(),
+  })
+  .passthrough();
+const clientsSchema = z.array(clientSchema);
 const recordSchema = z.record(z.unknown());
+const DEFAULT_RATE_LIMIT_RETRIES = 3;
+const MAX_RATE_LIMIT_DELAY_MS = 10_000;
+
+interface RateLimitRetryOptions {
+  maxRetries?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  random?: () => number;
+  now?: () => number;
+}
+
+interface ActionableConfigurationOptions {
+  includeCompliant?: boolean;
+  retry?: RateLimitRetryOptions;
+}
 
 const CONNECTION_VALIDATORS = new Set([
   "checkPasswordPolicy",
@@ -35,6 +62,11 @@ const LEGACY_PASSWORD_VALIDATORS = new Set([
   "checkPasswordHistory",
 ]);
 const ATTACK_VALIDATORS = new Set(["checkBruteForce", "checkBreachedPassword"]);
+const CLIENT_VALIDATORS = new Set([
+  "checkJWTSignAlg",
+  "checkCrossOriginAuthentication",
+  "checkGrantTypes",
+]);
 
 function tenantBaseUrl(domain: string): string {
   if (!/^[a-zA-Z0-9.-]+\.auth0\.com$/.test(domain)) {
@@ -59,6 +91,51 @@ async function parseJson(response: Response, label: string): Promise<unknown> {
     throw new AppError("AUTH0_READ_FAILED", `${label} returned invalid JSON.`, {
       cause: error,
     });
+  }
+}
+
+function rateLimitDelay(
+  response: Response,
+  retryIndex: number,
+  options: RateLimitRetryOptions,
+): number {
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    const delay = Number.isFinite(seconds)
+      ? seconds * 1_000
+      : Date.parse(retryAfter) - (options.now ?? Date.now)();
+    if (Number.isFinite(delay) && delay >= 0) {
+      return Math.min(delay, MAX_RATE_LIMIT_DELAY_MS);
+    }
+  }
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(reset) && reset > 0) {
+    const delay = reset * 1_000 - (options.now ?? Date.now)();
+    if (delay >= 0) return Math.min(delay, MAX_RATE_LIMIT_DELAY_MS);
+  }
+  const baseDelay = Math.min(100 * 2 ** retryIndex, 1_000);
+  const jitter = 0.8 + (options.random ?? Math.random)() * 0.4;
+  return Math.round(baseDelay * jitter);
+}
+
+async function fetchWithRateLimitRetry(
+  request: () => Promise<Response>,
+  options: RateLimitRetryOptions = {},
+): Promise<Response> {
+  const maxRetries = Math.max(
+    0,
+    Math.min(options.maxRetries ?? DEFAULT_RATE_LIMIT_RETRIES, 10),
+  );
+  const sleep =
+    options.sleep ??
+    ((milliseconds: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  for (let retryIndex = 0; ; retryIndex += 1) {
+    const response = await request();
+    if (response.status !== 429 || retryIndex >= maxRetries) return response;
+    await response.body?.cancel();
+    await sleep(rateLimitDelay(response, retryIndex, options));
   }
 }
 
@@ -108,8 +185,10 @@ function change(
   configPath: string,
   currentValue: ConfigurationValue,
   targetValue: ConfigurationValue,
+  includeCompliant = false,
 ): ActionableChange | undefined {
-  if (sameValue(currentValue, targetValue)) return undefined;
+  if (sameValue(currentValue, targetValue) && !includeCompliant)
+    return undefined;
   return {
     resourceType,
     resourceId,
@@ -123,6 +202,7 @@ function change(
 function connectionChanges(
   finding: NormalizedCheckmateFinding,
   connection: z.infer<typeof connectionSchema>,
+  includeCompliant = false,
 ): ActionableChange[] {
   const options = connection.options ?? {};
   if (
@@ -135,7 +215,7 @@ function connectionChanges(
   switch (finding.validatorId) {
     case "checkPasswordPolicy": {
       const current = valueAt(options, ["passwordPolicy"]);
-      if (current !== "good" && current !== "excellent") {
+      if (includeCompliant || (current !== "good" && current !== "excellent")) {
         proposed.push(
           change(
             "connection",
@@ -144,6 +224,7 @@ function connectionChanges(
             "options.passwordPolicy",
             current,
             "good",
+            includeCompliant,
           ),
         );
       }
@@ -154,7 +235,7 @@ function connectionChanges(
         "password_complexity_options",
         "min_length",
       ]);
-      if (typeof current !== "number" || current < 12) {
+      if (includeCompliant || typeof current !== "number" || current < 12) {
         proposed.push(
           change(
             "connection",
@@ -163,6 +244,7 @@ function connectionChanges(
             "options.password_complexity_options.min_length",
             current,
             12,
+            includeCompliant,
           ),
         );
       }
@@ -177,6 +259,7 @@ function connectionChanges(
           "options.password_no_personal_info.enable",
           valueAt(options, ["password_no_personal_info", "enable"]),
           true,
+          includeCompliant,
         ),
       );
       break;
@@ -189,6 +272,7 @@ function connectionChanges(
           "options.password_history.enable",
           valueAt(options, ["password_history", "enable"]),
           true,
+          includeCompliant,
         ),
       );
       break;
@@ -201,6 +285,7 @@ function connectionChanges(
           "options.authentication_methods.passkey.enabled",
           valueAt(options, ["authentication_methods", "passkey", "enabled"]),
           true,
+          includeCompliant,
         ),
       );
       break;
@@ -210,7 +295,7 @@ function connectionChanges(
         "email",
         "verification_method",
       ]);
-      if (current !== null && current !== "otp") {
+      if (current !== null && (includeCompliant || current !== "otp")) {
         proposed.push(
           change(
             "connection",
@@ -219,6 +304,7 @@ function connectionChanges(
             "options.attributes.email.verification_method",
             current,
             "otp",
+            includeCompliant,
           ),
         );
       }
@@ -233,9 +319,99 @@ function addString(values: ConfigurationValue, required: string[]): string[] {
   return [...new Set([...existing, ...required])];
 }
 
+function clientIdFromFinding(
+  finding: NormalizedCheckmateFinding,
+): string | undefined {
+  if (finding.affectedResource?.id) return finding.affectedResource.id;
+  const raw = record(finding.raw);
+  const rawClientId = raw?.client_id;
+  if (typeof rawClientId === "string" && rawClientId.trim()) {
+    return rawClientId.trim();
+  }
+  return finding.affectedResource?.name?.match(/\(([A-Za-z0-9_-]{8,})\)/)?.[1];
+}
+
+function clientsForFinding(
+  finding: NormalizedCheckmateFinding,
+  clients: readonly z.infer<typeof clientSchema>[],
+): z.infer<typeof clientSchema>[] {
+  const clientId = clientIdFromFinding(finding);
+  if (clientId) {
+    const idMatch = clients.find((client) => client.client_id === clientId);
+    if (idMatch) return [idMatch];
+  }
+  const resourceName = finding.affectedResource?.name;
+  if (!resourceName) return [];
+  const nameMatches = clients.filter(
+    (client) =>
+      resourceName === client.name ||
+      resourceName.startsWith(`${client.name} (`),
+  );
+  return nameMatches.length === 1 ? nameMatches : [];
+}
+
+function clientChanges(
+  finding: NormalizedCheckmateFinding,
+  client: z.infer<typeof clientSchema>,
+  includeCompliant = false,
+): ActionableChange[] {
+  const proposed: Array<ActionableChange | undefined> = [];
+  if (finding.validatorId === "checkJWTSignAlg") {
+    const configured = valueAt(client.jwt_configuration ?? {}, ["alg"]);
+    const current = configured ?? "RS256";
+    proposed.push(
+      change(
+        "client",
+        client.client_id,
+        client.name,
+        "jwt_configuration.alg",
+        current,
+        "RS256",
+        includeCompliant,
+      ),
+    );
+  }
+  if (finding.validatorId === "checkCrossOriginAuthentication") {
+    const current =
+      client.cross_origin_auth ?? client.cross_origin_authentication ?? null;
+    if (current !== null) {
+      proposed.push(
+        change(
+          "client",
+          client.client_id,
+          client.name,
+          "cross_origin_auth",
+          current,
+          false,
+          includeCompliant,
+        ),
+      );
+    }
+  }
+  if (finding.validatorId === "checkGrantTypes" && client.grant_types) {
+    const current = client.grant_types;
+    const target = current.filter((grantType) => grantType !== "implicit");
+    if (includeCompliant || target.length !== current.length) {
+      proposed.push(
+        change(
+          "client",
+          client.client_id,
+          client.name,
+          "grant_types",
+          current,
+          target,
+          includeCompliant,
+        ),
+      );
+    }
+  }
+  return proposed.filter((item): item is ActionableChange => Boolean(item));
+}
+
 function attackChanges(
   finding: NormalizedCheckmateFinding,
   config: Record<string, unknown>,
+  includeCompliant = false,
 ): ActionableChange[] {
   const resourceId = finding.validatorId ?? finding.id;
   const proposed: Array<ActionableChange | undefined> = [];
@@ -248,6 +424,7 @@ function attackChanges(
         "enabled",
         valueAt(config, ["enabled"]),
         true,
+        includeCompliant,
       ),
       change(
         "attack_protection",
@@ -256,6 +433,7 @@ function attackChanges(
         "shields",
         valueAt(config, ["shields"]),
         addString(valueAt(config, ["shields"]), ["block", "user_notification"]),
+        includeCompliant,
       ),
     );
   }
@@ -268,6 +446,7 @@ function attackChanges(
         "enabled",
         valueAt(config, ["enabled"]),
         true,
+        includeCompliant,
       ),
       change(
         "attack_protection",
@@ -276,6 +455,7 @@ function attackChanges(
         "shields",
         valueAt(config, ["shields"]),
         addString(valueAt(config, ["shields"]), ["block"]),
+        includeCompliant,
       ),
       change(
         "attack_protection",
@@ -287,6 +467,7 @@ function attackChanges(
           valueAt(config, ["stage", "pre-user-registration", "shields"]),
           ["block"],
         ),
+        includeCompliant,
       ),
       change(
         "attack_protection",
@@ -298,6 +479,7 @@ function attackChanges(
           valueAt(config, ["stage", "pre-change-password", "shields"]),
           ["block"],
         ),
+        includeCompliant,
       ),
     );
   }
@@ -310,6 +492,7 @@ export async function loadActionableConfiguration(
   findings: readonly NormalizedCheckmateFinding[],
   config: CheckmateConfig,
   fetcher: Fetcher = fetch,
+  options: ActionableConfigurationOptions = {},
 ): Promise<ActionableConfigurationMap> {
   const baseUrl = tenantBaseUrl(config.domain);
   const needsConnections = findings.some((finding) =>
@@ -318,27 +501,35 @@ export async function loadActionableConfiguration(
   const needsAttack = findings.some((finding) =>
     ATTACK_VALIDATORS.has(finding.validatorId ?? ""),
   );
+  const needsClients = findings.some((finding) =>
+    CLIENT_VALIDATORS.has(finding.validatorId ?? ""),
+  );
   const scopes = [
     ...(needsConnections
       ? ["read:connections", "read:connections_options"]
       : []),
     ...(needsAttack ? ["read:attack_protection"] : []),
+    ...(needsClients ? ["read:clients"] : []),
   ];
   if (scopes.length === 0) return new Map();
 
   try {
-    const tokenResponse = await fetcher(`${baseUrl}/oauth/token`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "client_credentials",
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        audience: `${baseUrl}/api/v2/`,
-        scope: scopes.join(" "),
-      }),
-      signal: AbortSignal.timeout(30_000),
-    });
+    const tokenResponse = await fetchWithRateLimitRetry(
+      () =>
+        fetcher(`${baseUrl}/oauth/token`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            grant_type: "client_credentials",
+            client_id: config.clientId,
+            client_secret: config.clientSecret,
+            audience: `${baseUrl}/api/v2/`,
+            scope: scopes.join(" "),
+          }),
+          signal: AbortSignal.timeout(30_000),
+        }),
+      options.retry,
+    );
     if (!tokenResponse.ok) {
       throw new AppError(
         "AUTH0_READ_FAILED",
@@ -362,10 +553,14 @@ export async function loadActionableConfiguration(
       url.searchParams.set("fields", "id,name,strategy,options");
       url.searchParams.set("include_fields", "true");
       url.searchParams.set("per_page", "100");
-      const response = await fetcher(url, {
-        headers,
-        signal: AbortSignal.timeout(30_000),
-      });
+      const response = await fetchWithRateLimitRetry(
+        () =>
+          fetcher(url, {
+            headers,
+            signal: AbortSignal.timeout(30_000),
+          }),
+        options.retry,
+      );
       const parsed = connectionsSchema.safeParse(
         await parseJson(response, "Auth0 database connection read"),
       );
@@ -381,15 +576,49 @@ export async function loadActionableConfiguration(
       connections = parsed.data;
     }
 
+    const clients: z.infer<typeof clientsSchema> = [];
+    if (needsClients) {
+      let page = 0;
+      while (true) {
+        const url = new URL(`${baseUrl}/api/v2/clients`);
+        url.searchParams.set("per_page", "100");
+        url.searchParams.set("page", String(page));
+        const response = await fetchWithRateLimitRetry(
+          () =>
+            fetcher(url, {
+              headers,
+              signal: AbortSignal.timeout(30_000),
+            }),
+          options.retry,
+        );
+        const parsed = clientsSchema.safeParse(
+          await parseJson(response, "Auth0 application configuration read"),
+        );
+        if (!parsed.success) {
+          throw new AppError(
+            "AUTH0_READ_FAILED",
+            "Auth0 returned invalid application configuration.",
+          );
+        }
+        clients.push(...parsed.data);
+        if (parsed.data.length < 100) break;
+        page += 1;
+      }
+    }
+
     let bruteForce: Record<string, unknown> | undefined;
     let breachedPassword: Record<string, unknown> | undefined;
     if (findings.some((finding) => finding.validatorId === "checkBruteForce")) {
-      const response = await fetcher(
-        `${baseUrl}/api/v2/attack-protection/brute-force-protection`,
-        {
-          headers,
-          signal: AbortSignal.timeout(30_000),
-        },
+      const response = await fetchWithRateLimitRetry(
+        () =>
+          fetcher(
+            `${baseUrl}/api/v2/attack-protection/brute-force-protection`,
+            {
+              headers,
+              signal: AbortSignal.timeout(30_000),
+            },
+          ),
+        options.retry,
       );
       bruteForce = record(
         await parseJson(response, "Auth0 brute-force protection read"),
@@ -400,12 +629,16 @@ export async function loadActionableConfiguration(
         (finding) => finding.validatorId === "checkBreachedPassword",
       )
     ) {
-      const response = await fetcher(
-        `${baseUrl}/api/v2/attack-protection/breached-password-detection`,
-        {
-          headers,
-          signal: AbortSignal.timeout(30_000),
-        },
+      const response = await fetchWithRateLimitRetry(
+        () =>
+          fetcher(
+            `${baseUrl}/api/v2/attack-protection/breached-password-detection`,
+            {
+              headers,
+              signal: AbortSignal.timeout(30_000),
+            },
+          ),
+        options.retry,
       );
       breachedPassword = record(
         await parseJson(response, "Auth0 breached-password protection read"),
@@ -421,15 +654,23 @@ export async function loadActionableConfiguration(
           (connection) => !name || connection.name === name,
         );
         changes = matching.flatMap((connection) =>
-          connectionChanges(finding, connection),
+          connectionChanges(finding, connection, options.includeCompliant),
+        );
+      } else if (CLIENT_VALIDATORS.has(finding.validatorId ?? "")) {
+        changes = clientsForFinding(finding, clients).flatMap((client) =>
+          clientChanges(finding, client, options.includeCompliant),
         );
       } else if (finding.validatorId === "checkBruteForce" && bruteForce) {
-        changes = attackChanges(finding, bruteForce);
+        changes = attackChanges(finding, bruteForce, options.includeCompliant);
       } else if (
         finding.validatorId === "checkBreachedPassword" &&
         breachedPassword
       ) {
-        changes = attackChanges(finding, breachedPassword);
+        changes = attackChanges(
+          finding,
+          breachedPassword,
+          options.includeCompliant,
+        );
       }
       if (changes.length > 0) result.set(finding.id, changes);
     }

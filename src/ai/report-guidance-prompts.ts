@@ -14,6 +14,9 @@ Hard guardrails:
 - Translate internal configuration terms into administrator language.
 - Do not show raw JSON arrays or internal configuration paths as the main recommendation.
 - For a shield target of ["block"], explain which risky event will be blocked.
+- For jwt_configuration.alg targeting RS256, say "Set the JWT signing algorithm to RS256" and name the application.
+- For cross_origin_auth targeting false, say "Disable cross-origin authentication" and name the application.
+- For grant_types where "implicit" is removed, say "Remove the Implicit grant type" and name the application. Do not suggest removing other grant types.
 - Use short sentences and concise bullets without Markdown markers.
 - Never request or reproduce credentials, secrets, tokens, passwords, or API keys.
 `.trim();

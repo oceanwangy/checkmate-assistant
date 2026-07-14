@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadActionableConfiguration } from "../src/auth0/configuration-reader.js";
-import type { Fetcher } from "../src/auth0/application-inventory.js";
+import type { Fetcher } from "../src/auth0/fetcher.js";
 import type { CheckmateConfig } from "../src/config/env.js";
 import type { NormalizedCheckmateFinding } from "../src/findings/types.js";
 
@@ -24,6 +24,52 @@ const passwordPolicyFinding: NormalizedCheckmateFinding = {
 };
 
 describe("Auth0 actionable configuration reader", () => {
+  it("automatically retries a rate-limited breached-password read", async () => {
+    const finding: NormalizedCheckmateFinding = {
+      id: "breached-password",
+      validatorId: "checkBreachedPassword",
+      title: "Breached Password Detection",
+      status: "failed",
+      raw: {},
+    };
+    const sleep = vi.fn(() => Promise.resolve());
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Too many requests" }), {
+          status: 429,
+          headers: { "retry-after": "2" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            enabled: false,
+            shields: [],
+            stage: {
+              "pre-user-registration": { shields: [] },
+              "pre-change-password": { shields: [] },
+            },
+          }),
+        ),
+      );
+
+    const result = await loadActionableConfiguration(
+      [finding],
+      config,
+      fetcher,
+      { retry: { sleep } },
+    );
+
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(2_000);
+    expect(result.get("breached-password")).toHaveLength(4);
+  });
+
   it("reads the live password policy and creates an exact change", async () => {
     const fetcher = vi
       .fn<Fetcher>()
@@ -125,5 +171,143 @@ describe("Auth0 actionable configuration reader", () => {
       fetcher,
     );
     expect(result.size).toBe(0);
+  });
+
+  it("creates exact application hardening changes from live client settings", async () => {
+    const applicationName =
+      "Test App (client_12345678) (First-Party Application)";
+    const applicationFindings: NormalizedCheckmateFinding[] = [
+      {
+        id: "jwt-algorithm",
+        validatorId: "checkJWTSignAlg",
+        title: "Application JWT signing algorithm",
+        status: "failed",
+        affectedResource: { name: applicationName },
+        raw: {},
+      },
+      {
+        id: "cross-origin",
+        validatorId: "checkCrossOriginAuthentication",
+        title: "Application cross-origin authentication",
+        status: "failed",
+        affectedResource: { name: applicationName },
+        raw: {},
+      },
+      {
+        id: "implicit-grant",
+        validatorId: "checkGrantTypes",
+        title: "Application grant types",
+        status: "failed",
+        affectedResource: { name: applicationName },
+        raw: {},
+      },
+    ];
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            {
+              client_id: "client_12345678",
+              name: "Test App",
+              app_type: "spa",
+              jwt_configuration: {
+                alg: "HS256",
+                lifetime_in_seconds: 36000,
+              },
+              cross_origin_auth: true,
+              grant_types: ["authorization_code", "implicit", "refresh_token"],
+            },
+          ]),
+        ),
+      );
+
+    const result = await loadActionableConfiguration(
+      applicationFindings,
+      config,
+      fetcher,
+    );
+
+    expect(result.get("jwt-algorithm")).toEqual([
+      {
+        resourceType: "client",
+        resourceId: "client_12345678",
+        resourceName: "Test App",
+        configPath: "jwt_configuration.alg",
+        currentValue: "HS256",
+        targetValue: "RS256",
+      },
+    ]);
+    expect(result.get("cross-origin")).toEqual([
+      {
+        resourceType: "client",
+        resourceId: "client_12345678",
+        resourceName: "Test App",
+        configPath: "cross_origin_auth",
+        currentValue: true,
+        targetValue: false,
+      },
+    ]);
+    expect(result.get("implicit-grant")).toEqual([
+      {
+        resourceType: "client",
+        resourceId: "client_12345678",
+        resourceName: "Test App",
+        configPath: "grant_types",
+        currentValue: ["authorization_code", "implicit", "refresh_token"],
+        targetValue: ["authorization_code", "refresh_token"],
+      },
+    ]);
+    const tokenBody = JSON.parse(
+      fetcher.mock.calls[0]?.[1]?.body as string,
+    ) as {
+      scope: string;
+    };
+    expect(tokenBody.scope).toContain("read:clients");
+  });
+
+  it("maps an application to another tenant by one unambiguous name", async () => {
+    const finding: NormalizedCheckmateFinding = {
+      id: "implicit-grant",
+      validatorId: "checkGrantTypes",
+      title: "Application grant types",
+      status: "failed",
+      affectedResource: {
+        name: "Shared App (dev_client_12345678) (First-Party Application)",
+      },
+      raw: {},
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            {
+              client_id: "prod_client_87654321",
+              name: "Shared App",
+              grant_types: ["authorization_code", "implicit"],
+            },
+          ]),
+        ),
+      );
+
+    const result = await loadActionableConfiguration(
+      [finding],
+      { ...config, profile: "prod" },
+      fetcher,
+      { includeCompliant: true },
+    );
+
+    expect(result.get("implicit-grant")?.[0]).toMatchObject({
+      resourceId: "prod_client_87654321",
+      resourceName: "Shared App",
+      targetValue: ["authorization_code"],
+    });
   });
 });

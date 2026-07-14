@@ -28,5 +28,14 @@ describe("report guidance guardrails", () => {
     expect(ACTIVE_REPORT_GUIDANCE_PROMPT).toContain(
       "Translate internal configuration terms into administrator language",
     );
+    expect(ACTIVE_REPORT_GUIDANCE_PROMPT).toContain(
+      "Set the JWT signing algorithm to RS256",
+    );
+    expect(ACTIVE_REPORT_GUIDANCE_PROMPT).toContain(
+      "Disable cross-origin authentication",
+    );
+    expect(ACTIVE_REPORT_GUIDANCE_PROMPT).toContain(
+      "Remove the Implicit grant type",
+    );
   });
 });

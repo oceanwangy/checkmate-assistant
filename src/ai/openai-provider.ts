@@ -207,7 +207,7 @@ function createTriageRequester(
         format: zodTextFormat(aiReportTriageSchema, "checkmate_report_triage"),
         verbosity: "low",
       },
-      max_output_tokens: 12_000,
+      max_output_tokens: 20_000,
       store: false,
     });
     return response.output_parsed;

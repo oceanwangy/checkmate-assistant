@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { executeApiPlan } from "../src/auth0/api-plan-executor.js";
-import type { Fetcher } from "../src/auth0/application-inventory.js";
+import {
+  executeApiPlan,
+  validateApiPlan,
+} from "../src/auth0/api-plan-executor.js";
+import type { Fetcher } from "../src/auth0/fetcher.js";
 import type { CheckmateConfig } from "../src/config/env.js";
 import type { ApiPlan } from "../src/remediation/api-plan.js";
 
@@ -21,6 +24,7 @@ function plan(): ApiPlan {
     sourceReport: "/reports/report.json",
     profile: "dev",
     unchangedActionIds: [],
+    alreadyCompliantActionIds: [],
     calls: [
       {
         id: "api-call-1",
@@ -56,6 +60,7 @@ function attackPlan(): ApiPlan {
     sourceReport: "/reports/report.json",
     profile: "dev",
     unchangedActionIds: [],
+    alreadyCompliantActionIds: [],
     calls: [
       {
         id: "api-call-1",
@@ -80,7 +85,92 @@ function attackPlan(): ApiPlan {
   };
 }
 
+function clientPlan(): ApiPlan {
+  return {
+    schemaVersion: 1,
+    generatedAt: "2026-07-10T10:00:00.000Z",
+    sourceReport: "/reports/report.json",
+    profile: "dev",
+    unchangedActionIds: [],
+    alreadyCompliantActionIds: [],
+    calls: [
+      {
+        id: "api-call-1",
+        method: "PATCH",
+        endpoint: "/api/v2/clients/client_12345678",
+        resourceType: "client",
+        resourceId: "client_12345678",
+        resourceName: "Test App",
+        bodyStrategy: "merge_live_nested_objects",
+        actionIds: ["action-alg", "action-cross-origin", "action-implicit"],
+        preconditions: [
+          { path: "jwt_configuration.alg", expectedValue: "HS256" },
+          { path: "cross_origin_auth", expectedValue: true },
+          {
+            path: "grant_types",
+            expectedValue: ["authorization_code", "implicit", "refresh_token"],
+          },
+        ],
+        body: {
+          jwt_configuration: { alg: "RS256" },
+          cross_origin_auth: false,
+          grant_types: ["authorization_code", "refresh_token"],
+        },
+      },
+    ],
+  };
+}
+
 describe("Auth0 API plan executor", () => {
+  it("validates live API preconditions without making a PATCH request", async () => {
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)));
+
+    const result = await validateApiPlan(plan(), config, { fetcher });
+
+    expect(result).toMatchObject({
+      valid: true,
+      profile: "dev",
+      calls: [{ status: "ready" }],
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const validationTokenBody = JSON.parse(
+      fetcher.mock.calls[0]?.[1]?.body as string,
+    ) as { scope: string };
+    expect(validationTokenBody.scope).toContain("read:connections");
+    expect(validationTokenBody.scope).toContain("update:connections");
+    expect(
+      fetcher.mock.calls.some(([, request]) => request?.method === "PATCH"),
+    ).toBe(false);
+  });
+
+  it("rejects API validation when Auth0 reports a missing update scope", async () => {
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          access_token: "management-token",
+          scope: "read:connections read:connections_options",
+        }),
+      ),
+    );
+
+    await expect(validateApiPlan(plan(), config, { fetcher })).rejects.toThrow(
+      "missing required scopes",
+    );
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
   it("merges planned connection changes into live options and verifies them", async () => {
     const before = {
       id: "con_database",
@@ -135,6 +225,86 @@ describe("Auth0 API plan executor", () => {
     });
     const headers = patch?.[1]?.headers as Record<string, string>;
     expect(headers["x-correlation-id"]).toMatch(/^checkmate-/);
+  });
+
+  it("omits null live connection options when executing an independent change", async () => {
+    const minimumLengthPlan: ApiPlan = {
+      ...plan(),
+      calls: [
+        {
+          ...plan().calls[0]!,
+          actionIds: ["action-minimum-length"],
+          preconditions: [
+            {
+              path: "options.password_complexity_options.min_length",
+              expectedValue: 1,
+            },
+          ],
+          body: {
+            options: { password_complexity_options: { min_length: 12 } },
+          },
+        },
+      ],
+    };
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: null,
+        password_complexity_options: { min_length: 1 },
+        requires_username: false,
+      },
+    };
+    const after = {
+      ...before,
+      options: {
+        ...before.options,
+        password_complexity_options: { min_length: 12 },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)));
+
+    const result = await executeApiPlan(minimumLengthPlan, config, { fetcher });
+
+    expect(result.status).toBe("succeeded");
+    expect(JSON.parse(fetcher.mock.calls[2]?.[1]?.body as string)).toEqual({
+      options: {
+        password_complexity_options: { min_length: 12 },
+        requires_username: false,
+      },
+    });
+  });
+
+  it("includes Auth0 error details when a PATCH is rejected", async () => {
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Payload validation failed" }), {
+          status: 400,
+        }),
+      );
+
+    const result = await executeApiPlan(plan(), config, { fetcher });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("status 400: Payload validation failed");
   });
 
   it("stops without patching when a live value has drifted", async () => {
@@ -197,6 +367,57 @@ describe("Auth0 API plan executor", () => {
         "pre-user-registration": { shields: ["block"] },
         "pre-change-password": { shields: ["block"] },
       },
+    });
+  });
+
+  it("validates and safely merges application-level changes", async () => {
+    const before = {
+      client_id: "client_12345678",
+      name: "Test App",
+      jwt_configuration: {
+        alg: "HS256",
+        lifetime_in_seconds: 36000,
+        secret_encoded: false,
+      },
+      cross_origin_auth: true,
+      grant_types: ["authorization_code", "implicit", "refresh_token"],
+    };
+    const after = {
+      ...before,
+      jwt_configuration: {
+        ...before.jwt_configuration,
+        alg: "RS256",
+      },
+      cross_origin_auth: false,
+      grant_types: ["authorization_code", "refresh_token"],
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)));
+
+    const result = await executeApiPlan(clientPlan(), config, { fetcher });
+
+    expect(result.status).toBe("succeeded");
+    const tokenBody = JSON.parse(
+      fetcher.mock.calls[0]?.[1]?.body as string,
+    ) as {
+      scope: string;
+    };
+    expect(tokenBody.scope).toContain("read:clients");
+    expect(tokenBody.scope).toContain("update:clients");
+    expect(JSON.parse(fetcher.mock.calls[2]?.[1]?.body as string)).toEqual({
+      jwt_configuration: {
+        alg: "RS256",
+        lifetime_in_seconds: 36000,
+        secret_encoded: false,
+      },
+      cross_origin_auth: false,
+      grant_types: ["authorization_code", "refresh_token"],
     });
   });
 

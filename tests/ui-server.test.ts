@@ -3,14 +3,18 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { AiProvider } from "../src/ai/provider.js";
-import type { ApiExecutionResult } from "../src/auth0/api-plan-executor.js";
+import type {
+  ApiExecutionResult,
+  ApiPlanValidationResult,
+} from "../src/auth0/api-plan-executor.js";
 import type { NormalizedCheckmateFinding } from "../src/findings/types.js";
 import type { ScanMetadata } from "../src/checkmate/types.js";
 import type { ActionableChange } from "../src/remediation/actionable-change.js";
 import { buildActionCandidates } from "../src/remediation/action-candidates.js";
 import { apiPlanSchema } from "../src/remediation/api-plan.js";
-import { createApiPlanOutputPath } from "../src/remediation/api-plan-writer.js";
+import { createChangePackagePaths } from "../src/remediation/change-package-writer.js";
 import { reviewSessionSchema } from "../src/remediation/review-schema.js";
+import type { TerraformValidationResult } from "../src/remediation/terraform-validator.js";
 import { startUiServer } from "../src/ui/server.js";
 import { parse } from "yaml";
 
@@ -86,10 +90,13 @@ describe("local review UI", () => {
       triageFindings,
     };
     const configurationLoader = vi.fn(
-      (findings: readonly NormalizedCheckmateFinding[]) => {
+      (
+        findings: readonly NormalizedCheckmateFinding[],
+        config: { profile: "dev" | "prod" },
+      ) => {
         const action: ActionableChange = {
           resourceType: "connection",
-          resourceId: "con_database",
+          resourceId: `con_${config.profile}`,
           resourceName: "Username-Password-Authentication",
           configPath: "options.passwordPolicy",
           currentValue: "fair",
@@ -97,7 +104,7 @@ describe("local review UI", () => {
         };
         const historyAction: ActionableChange = {
           resourceType: "connection",
-          resourceId: "con_database",
+          resourceId: `con_${config.profile}`,
           resourceName: "Username-Password-Authentication",
           configPath: "options.password_history.enable",
           currentValue: false,
@@ -133,9 +140,32 @@ describe("local review UI", () => {
         ],
       }),
     );
+    const apiPlanValidator = vi.fn(
+      (plan: { profile: "dev" | "prod" }): Promise<ApiPlanValidationResult> =>
+        Promise.resolve({
+          valid: true,
+          profile: plan.profile,
+          validatedAt: "2026-07-10T10:00:00.000Z",
+          calls: [],
+        }),
+    );
+    const terraformValidator = vi.fn(
+      (terraformFile: string): Promise<TerraformValidationResult> =>
+        Promise.resolve({
+          valid: true,
+          validatedAt: "2026-07-10T10:00:00.000Z",
+          terraformFile,
+          steps: [
+            { command: "fmt", valid: true, message: "formatted" },
+            { command: "init", valid: true, message: "initialised" },
+            { command: "validate", valid: true, message: "validated" },
+          ],
+        }),
+    );
     const running = await startUiServer(
       {
         report: reportPath,
+        profile: "dev",
         status: "failed",
         port: 0,
         outputDirectory,
@@ -147,10 +177,15 @@ describe("local review UI", () => {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
           AUTH0CHECKMATE_DEV_CLIENT_ID: "inventory-client",
           AUTH0CHECKMATE_DEV_CLIENT_SECRET: "never-return-this-secret",
+          AUTH0CHECKMATE_PROD_DOMAIN: "prod.auth0.com",
+          AUTH0CHECKMATE_PROD_CLIENT_ID: "prod-client",
+          AUTH0CHECKMATE_PROD_CLIENT_SECRET: "prod-secret",
         },
         now: () => new Date("2026-07-10T10:00:00.000Z"),
         configurationLoader,
         planExecutor,
+        apiPlanValidator,
+        terraformValidator,
       },
     );
 
@@ -238,11 +273,24 @@ describe("local review UI", () => {
         }),
       });
       expect(saveResponse.status).toBe(200);
+      const savedState = (await saveResponse.json()) as {
+        state: { findings: Array<{ key: string; adminNote?: string }> };
+      };
+      expect(
+        savedState.state.findings.find((finding) => finding.key === findingKey)
+          ?.adminNote,
+      ).toBe("The current access is temporarily accepted.");
       const stored = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
       );
       expect(stored.decisions[0]?.answers).toEqual([]);
       expect(stored.decisions[0]?.decision.status).toBe("accepted_risk");
+      expect(stored.decisions[0]?.decision.rationale).toBe(
+        "The current access is temporarily accepted.",
+      );
+      expect(stored.decisions[0]?.decision.adminNote).toBe(
+        "The current access is temporarily accepted.",
+      );
       expect(stored.decisions[0]?.actionableChangeId).toBe(findingKey);
       expect(stored.decisions[0]?.actionableChanges?.[0]).toMatchObject({
         configPath: "options.passwordPolicy",
@@ -300,7 +348,19 @@ describe("local review UI", () => {
         state: {
           submissionReady: boolean;
           submitted: boolean;
-          yamlFile: string;
+          changePackage: {
+            directory: string;
+            dev: {
+              apiFile: string;
+              terraformFile: string;
+              apiPlanSha256: string;
+            };
+            prod: {
+              apiFile: string;
+              terraformFile: string;
+              apiPlanSha256: string;
+            };
+          };
         };
       };
       expect(submitted).toMatchObject({
@@ -310,22 +370,95 @@ describe("local review UI", () => {
           submitted: true,
         },
       });
-      expect(submitted.state.yamlFile).toMatch(/\.api-plan\.yml$/);
+      expect(submitted.state.changePackage).toMatchObject({
+        dev: { apiFile: "dev/api-plan.yml", terraformFile: "dev/main.tf" },
+        prod: {
+          apiFile: "prod/api-plan.yml",
+          terraformFile: "prod/main.tf",
+        },
+      });
+      expect(submitted.state.changePackage.dev.apiPlanSha256).toMatch(
+        /^[a-f0-9]{64}$/,
+      );
+      const packagePaths = createChangePackagePaths(running.outputPath);
       const apiPlan = apiPlanSchema.parse(
-        parse(
-          await readFile(createApiPlanOutputPath(running.outputPath), "utf8"),
-        ),
+        parse(await readFile(packagePaths.dev.apiPlan, "utf8")),
       );
       expect(apiPlan.calls).toHaveLength(1);
       expect(apiPlan.calls[0]).toMatchObject({
         method: "PATCH",
-        endpoint: "/api/v2/connections/con_database",
+        endpoint: "/api/v2/connections/con_dev",
         actionIds: [triaged.findings[1]!.key],
         body: {
           options: { password_history: { enable: true } },
         },
       });
       expect(apiPlan.unchangedActionIds).toEqual([findingKey]);
+      const productionPlan = apiPlanSchema.parse(
+        parse(await readFile(packagePaths.prod.apiPlan, "utf8")),
+      );
+      expect(productionPlan).toMatchObject({
+        profile: "prod",
+        calls: [{ endpoint: "/api/v2/connections/con_prod" }],
+      });
+      expect(await readFile(packagePaths.dev.terraform, "utf8")).toContain(
+        'data "auth0_connection"',
+      );
+      expect(await readFile(packagePaths.prod.terraform, "utf8")).toContain(
+        'profile        = "prod"',
+      );
+
+      const apiPreview = await fetch(
+        `${running.url}/api/artifact?profile=dev&artifact=api`,
+        { headers: { cookie: cookie! } },
+      );
+      expect(apiPreview.status).toBe(200);
+      expect(apiPreview.headers.get("content-type")).toContain(
+        "application/yaml",
+      );
+      expect(await apiPreview.text()).toContain("profile: dev");
+
+      const terraformDownload = await fetch(
+        `${running.url}/api/artifact?profile=prod&artifact=terraform&download=1`,
+        { headers: { cookie: cookie! } },
+      );
+      expect(terraformDownload.status).toBe(200);
+      expect(terraformDownload.headers.get("content-disposition")).toBe(
+        'attachment; filename="prod-main.tf"',
+      );
+      expect(await terraformDownload.text()).toContain(
+        'profile        = "prod"',
+      );
+
+      const unsupportedArtifact = await fetch(
+        `${running.url}/api/artifact?profile=dev&artifact=../report`,
+        { headers: { cookie: cookie! } },
+      );
+      expect(unsupportedArtifact.status).toBe(400);
+
+      const reviewedPlanContent = await readFile(
+        packagePaths.dev.apiPlan,
+        "utf8",
+      );
+      await writeFile(
+        packagePaths.dev.apiPlan,
+        `${reviewedPlanContent}\n# changed after review\n`,
+      );
+      const changedPlanResponse = await fetch(`${running.url}/api/execute`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      expect(changedPlanResponse.status).toBe(400);
+      expect(await changedPlanResponse.text()).toContain(
+        "changed after review",
+      );
+      expect(planExecutor).not.toHaveBeenCalled();
+      await writeFile(packagePaths.dev.apiPlan, reviewedPlanContent);
 
       const executeResponse = await fetch(`${running.url}/api/execute`, {
         method: "POST",
@@ -352,6 +485,8 @@ describe("local review UI", () => {
         },
       });
       expect(planExecutor).toHaveBeenCalledOnce();
+      expect(apiPlanValidator).toHaveBeenCalledTimes(3);
+      expect(terraformValidator).toHaveBeenCalledTimes(3);
       const executionRecord = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
       );
@@ -360,7 +495,160 @@ describe("local review UI", () => {
         profile: "dev",
         calls: [{ status: "applied" }],
       });
-      expect(executionRecord.execution?.planFile).toMatch(/\.api-plan\.yml$/);
+      expect(executionRecord.execution?.planFile).toBe("dev/api-plan.yml");
+      expect(executionRecord.execution?.planSha256).toBe(
+        submitted.state.changePackage.dev.apiPlanSha256,
+      );
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("groups deterministic application changes with selectable applications", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-ui-"));
+    const reportPath = path.join(directory, "applications.json");
+    await writeFile(
+      reportPath,
+      JSON.stringify([
+        {
+          finding_name: "checkGrantTypes",
+          finding_title: "Application Grant Types",
+          status: "red",
+          severity: "High",
+          name: "App One (client_one12345) (First-Party Application)",
+          field: "unexpected_grant_type_for_app_type",
+          value: "implicit",
+          message: "The Implicit grant type is enabled.",
+        },
+        {
+          finding_name: "checkGrantTypes",
+          finding_title: "Application Grant Types",
+          status: "red",
+          severity: "High",
+          name: "App Two (client_two12345) (First-Party Application)",
+          field: "unexpected_grant_type_for_app_type",
+          value: "implicit",
+          message: "The Implicit grant type is enabled.",
+        },
+      ]),
+    );
+    const triageFindings = vi.fn().mockResolvedValue([]);
+    const provider: AiProvider = {
+      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
+      triageFindings,
+    };
+    const configurationLoader = vi.fn(
+      (findings: readonly NormalizedCheckmateFinding[]) =>
+        Promise.resolve(
+          new Map(
+            findings.map((finding, index): [string, ActionableChange[]] => {
+              const suffix = index === 0 ? "one" : "two";
+              return [
+                finding.id,
+                [
+                  {
+                    resourceType: "client",
+                    resourceId: `client_${suffix}12345`,
+                    resourceName: index === 0 ? "App One" : "App Two",
+                    configPath: "grant_types",
+                    currentValue: [
+                      "authorization_code",
+                      "implicit",
+                      "refresh_token",
+                    ],
+                    targetValue: ["authorization_code", "refresh_token"],
+                  },
+                ],
+              ];
+            }),
+          ),
+        ),
+    );
+    const running = await startUiServer(
+      {
+        report: reportPath,
+        profile: "dev",
+        status: "failed",
+        port: 0,
+        outputDirectory: directory,
+      },
+      {
+        provider,
+        configurationLoader,
+        env: {
+          AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+          AUTH0CHECKMATE_DEV_CLIENT_ID: "client-id",
+          AUTH0CHECKMATE_DEV_CLIENT_SECRET: "client-secret",
+        },
+        now: () => new Date("2026-07-14T10:00:00.000Z"),
+      },
+    );
+
+    try {
+      const root = await fetch(running.url);
+      const cookie = root.headers.get("set-cookie")?.split(";")[0];
+      const response = await fetch(`${running.url}/api/triage`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      const state = (await response.json()) as {
+        findings: Array<{
+          key: string;
+          title: string;
+          selectionMode: string;
+          actionableChanges: Array<{ actionId: string; resourceName: string }>;
+        }>;
+      };
+      expect(state.findings).toHaveLength(1);
+      expect(state.findings[0]).toMatchObject({
+        key: "applications-remove-implicit",
+        title: "Remove the Implicit grant type from",
+        selectionMode: "applications",
+        actionableChanges: [
+          { resourceName: "App One" },
+          { resourceName: "App Two" },
+        ],
+      });
+      expect(triageFindings).not.toHaveBeenCalled();
+
+      const selectedActionId =
+        state.findings[0]!.actionableChanges[0]!.actionId;
+      const save = await fetch(`${running.url}/api/decision`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          findingKey: state.findings[0]!.key,
+          status: "approved",
+          rationale: "",
+          selectedActionIds: [selectedActionId],
+        }),
+      });
+      expect(save.status).toBe(200);
+      const stored = reviewSessionSchema.parse(
+        JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
+      );
+      expect(stored.decisions).toHaveLength(2);
+      expect(
+        stored.decisions.map((decision) => decision.decision.status),
+      ).toEqual(["approved", "accepted_risk"]);
+      expect(
+        stored.decisions.map((decision) => decision.decision.rationale),
+      ).toEqual(["Accepted AI suggestion.", "Remained unchanged."]);
+      expect(
+        stored.decisions.every(
+          (decision) => decision.decision.adminNote === undefined,
+        ),
+      ).toBe(true);
     } finally {
       await running.close();
     }
