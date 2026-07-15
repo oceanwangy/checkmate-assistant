@@ -6,7 +6,7 @@ import tseslint from "typescript-eslint";
 export default tseslint.config(
   {
     ignores: [
-      "dist/**",
+      "**/dist/**",
       "node_modules/**",
       "reports/**",
       "remediation-plans/**",
@@ -36,7 +36,7 @@ export default tseslint.config(
     languageOptions: { globals: globals.node },
   },
   {
-    files: ["src/ui/public/**/*.js"],
+    files: ["src/ui/public/**/*.js", "apps/checkmate-chat/public/**/*.js"],
     languageOptions: { globals: globals.browser },
   },
   prettier,

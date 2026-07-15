@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { CheckmateConfig } from "../config/env.js";
 import type { ProfileName } from "../config/profiles.js";
@@ -36,6 +36,8 @@ export interface ApiExecutionResult {
 export interface ApiPlanExecutorOptions {
   fetcher?: Fetcher;
   now?: () => Date;
+  includeRequestBodies?: boolean;
+  approvedRequestDigests?: Readonly<Record<string, string>>;
 }
 
 export interface ApiPlanValidationResult {
@@ -45,7 +47,11 @@ export interface ApiPlanValidationResult {
   calls: Array<{
     id: string;
     endpoint: string;
+    method: "PATCH";
+    resourceName: string;
     status: "ready" | "already_applied" | "invalid";
+    requestBody?: Record<string, unknown>;
+    requestSha256?: string;
     error?: string;
   }>;
   error?: string;
@@ -158,6 +164,29 @@ function sameValue(left: unknown, right: unknown): boolean {
 
 function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
   return structuredClone(value);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+export function apiRequestSha256(
+  method: "PATCH",
+  endpoint: string,
+  body: Record<string, unknown>,
+): string {
+  return createHash("sha256")
+    .update(`${method}\n${endpoint}\n${canonicalJson(body)}`, "utf8")
+    .digest("hex");
 }
 
 function mergeRecords(
@@ -434,19 +463,28 @@ export async function validateApiPlan(
         authorization,
       );
       const status = classifyLiveState(call, live);
-      if (status === "safe_to_apply") {
-        requestBody(call, live);
-      }
+      const body =
+        status === "safe_to_apply" ? requestBody(call, live) : undefined;
       calls.push({
         id: call.id,
         endpoint: call.endpoint,
+        method: call.method,
+        resourceName: call.resourceName,
         status: status === "target" ? "already_applied" : "ready",
+        ...(body
+          ? {
+              ...(options.includeRequestBodies ? { requestBody: body } : {}),
+              requestSha256: apiRequestSha256(call.method, call.endpoint, body),
+            }
+          : {}),
       });
     } catch (error) {
       const message = toErrorMessage(error);
       calls.push({
         id: call.id,
         endpoint: call.endpoint,
+        method: call.method,
+        resourceName: call.resourceName,
         status: "invalid",
         error: message,
       });
@@ -521,6 +559,18 @@ export async function executeApiPlan(
         });
         continue;
       }
+      const body = requestBody(call, live);
+      const approvedDigests = options.approvedRequestDigests;
+      if (approvedDigests) {
+        const approved = approvedDigests[call.id];
+        const actual = apiRequestSha256(call.method, call.endpoint, body);
+        if (!approved || approved !== actual) {
+          throw new AppError(
+            "AUTH0_WRITE_FAILED",
+            `Execution stopped because the exact API request for ${call.resourceName} no longer matches the confirmed preview. Create and confirm a new dev plan.`,
+          );
+        }
+      }
       const response = await fetcher(new URL(call.endpoint, baseUrl), {
         method: "PATCH",
         headers: {
@@ -528,7 +578,7 @@ export async function executeApiPlan(
           "content-type": "application/json",
           "x-correlation-id": correlationId,
         },
-        body: JSON.stringify(requestBody(call, live)),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(30_000),
       });
       await responseJson(response, `Auth0 update for ${call.resourceName}`);

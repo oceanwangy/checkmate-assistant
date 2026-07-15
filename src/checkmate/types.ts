@@ -1,17 +1,9 @@
-import type { NormalizedCheckmateFinding } from "../findings/types.js";
 import type { ProfileName } from "../config/profiles.js";
 
-export interface NormalizedCheckmateReport {
-  tenant?: string;
-  generatedAt?: string;
-  findings: NormalizedCheckmateFinding[];
-  raw: unknown;
-  findingsOnly: boolean;
-}
-
-export interface LoadedCheckmateReport extends NormalizedCheckmateReport {
-  sourcePath: string;
-}
+export type {
+  LoadedCheckmateReport,
+  NormalizedCheckmateReport,
+} from "@checkmate-assistant/core";
 
 export interface ReportCounts {
   passed: number;

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Ask security questions grounded in your latest Auth0 CheckMate report."
+    />
+    <title>CheckMate Assistant</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="CheckMate Assistant home">
+          <span class="brand-mark" aria-hidden="true">C</span>
+          <span>
+            <strong>CHECKMATE</strong>
+            <small>ASSISTANT</small>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <a
+            id="remediation-link"
+            class="review-link"
+            href="http://127.0.0.1:4317"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Review changes
+            <span aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </header>
+
+      <main>
+        <section class="context-bar" aria-label="Data sources">
+          <div class="context-primary">
+            <span class="eyebrow">CURRENT EVIDENCE</span>
+            <div id="report-title" class="report-title">
+              Loading latest report…
+            </div>
+            <div id="report-detail" class="report-detail">
+              Connecting to CheckMate MCP
+            </div>
+          </div>
+          <div class="source-status" aria-live="polite">
+            <div id="checkmate-status" class="source-chip pending">
+              <span class="source-icon">CM</span>
+              <span><strong>CheckMate</strong><small>Connecting</small></span>
+            </div>
+            <div id="auth0-status" class="source-chip pending">
+              <span class="source-icon auth0">A0</span>
+              <span><strong>Auth0 live</strong><small>Connecting</small></span>
+            </div>
+            <div id="dev-status" class="source-chip pending">
+              <span class="source-icon dev">DEV</span>
+              <span><strong>Dev changes</strong><small>Checking</small></span>
+            </div>
+          </div>
+        </section>
+
+        <div class="conversation-wrap">
+          <section id="welcome" class="welcome">
+            <span class="eyebrow">ASK YOUR TENANT</span>
+            <h1>Turn security findings into clear next steps.</h1>
+            <p>
+              Ask in plain language. Answers are grounded in your newest
+              CheckMate report and, when available, live read-only Auth0
+              context. Supported findings can become an exact, confirmed dev API
+              change.
+            </p>
+            <div class="starter-grid" aria-label="Example questions">
+              <button
+                class="starter-card"
+                type="button"
+                data-question="I recently experienced a credential stuffing attack. What should I do first?"
+              >
+                <span class="starter-number">01</span>
+                <strong>Respond to credential stuffing</strong>
+                <span>Find the controls that reduce immediate risk.</span>
+                <span class="starter-arrow" aria-hidden="true">→</span>
+              </button>
+              <button
+                class="starter-card"
+                type="button"
+                data-question="What are the most important security weaknesses in this tenant?"
+              >
+                <span class="starter-number">02</span>
+                <strong>Prioritise tenant weaknesses</strong>
+                <span>Separate quick wins from business decisions.</span>
+                <span class="starter-arrow" aria-hidden="true">→</span>
+              </button>
+              <button
+                class="starter-card"
+                type="button"
+                data-question="How should I harden the GrantMate application?"
+              >
+                <span class="starter-number">03</span>
+                <strong>Harden an application</strong>
+                <span>Review report evidence for GrantMate.</span>
+                <span class="starter-arrow" aria-hidden="true">→</span>
+              </button>
+            </div>
+          </section>
+
+          <section
+            id="conversation"
+            class="conversation"
+            aria-live="polite"
+            aria-label="Conversation"
+          ></section>
+        </div>
+      </main>
+
+      <footer class="composer-shell">
+        <form id="chat-form" class="composer">
+          <label class="sr-only" for="question">Ask a security question</label>
+          <textarea
+            id="question"
+            name="question"
+            rows="1"
+            maxlength="2000"
+            placeholder="Ask about credential stuffing, MFA, token security, or a particular app…"
+            autocomplete="off"
+          ></textarea>
+          <button id="send-button" type="submit" aria-label="Send question">
+            <span>Ask</span>
+            <span aria-hidden="true">↑</span>
+          </button>
+        </form>
+        <div class="composer-meta">
+          <span
+            >No tenant change occurs without an exact dev API preview and
+            confirmation.</span
+          >
+          <button id="clear-button" type="button">Clear conversation</button>
+        </div>
+      </footer>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

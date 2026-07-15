@@ -137,7 +137,10 @@ describe("Auth0 API plan executor", () => {
       )
       .mockResolvedValueOnce(new Response(JSON.stringify(before)));
 
-    const result = await validateApiPlan(plan(), config, { fetcher });
+    const result = await validateApiPlan(plan(), config, {
+      fetcher,
+      includeRequestBodies: true,
+    });
 
     expect(result).toMatchObject({
       valid: true,
@@ -145,6 +148,13 @@ describe("Auth0 API plan executor", () => {
       calls: [{ status: "ready" }],
     });
     expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.calls[0]?.requestBody).toEqual({
+      options: {
+        passwordPolicy: "good",
+        password_history: { enable: true },
+      },
+    });
+    expect(result.calls[0]?.requestSha256).toMatch(/^[a-f0-9]{64}$/);
     const validationTokenBody = JSON.parse(
       fetcher.mock.calls[0]?.[1]?.body as string,
     ) as { scope: string };
@@ -331,6 +341,34 @@ describe("Auth0 API plan executor", () => {
     expect(result.error).toContain("changed after the plan was created");
     expect(result.calls[0]?.status).toBe("failed");
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops when the execution request differs from the confirmed preview", async () => {
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)));
+
+    const result = await executeApiPlan(plan(), config, {
+      fetcher,
+      approvedRequestDigests: { "api-call-1": "0".repeat(64) },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("no longer matches the confirmed preview");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(
+      fetcher.mock.calls.some(([, request]) => request?.method === "PATCH"),
+    ).toBe(false);
   });
 
   it("preserves unselected nested attack-protection settings", async () => {

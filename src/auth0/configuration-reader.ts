@@ -416,26 +416,44 @@ function attackChanges(
   const resourceId = finding.validatorId ?? finding.id;
   const proposed: Array<ActionableChange | undefined> = [];
   if (finding.validatorId === "checkBruteForce") {
-    proposed.push(
-      change(
-        "attack_protection",
-        resourceId,
-        "Brute Force Protection",
-        "enabled",
-        valueAt(config, ["enabled"]),
-        true,
-        includeCompliant,
-      ),
-      change(
-        "attack_protection",
-        resourceId,
-        "Brute Force Protection",
-        "shields",
-        valueAt(config, ["shields"]),
-        addString(valueAt(config, ["shields"]), ["block", "user_notification"]),
-        includeCompliant,
-      ),
-    );
+    const findingEvidence = record(finding.evidence);
+    if (findingEvidence?.field === "enableAccountLockout") {
+      proposed.push(
+        change(
+          "attack_protection",
+          resourceId,
+          "Brute Force Protection",
+          "mode",
+          valueAt(config, ["mode"]),
+          "count_per_identifier",
+          includeCompliant,
+        ),
+      );
+    } else {
+      proposed.push(
+        change(
+          "attack_protection",
+          resourceId,
+          "Brute Force Protection",
+          "enabled",
+          valueAt(config, ["enabled"]),
+          true,
+          includeCompliant,
+        ),
+        change(
+          "attack_protection",
+          resourceId,
+          "Brute Force Protection",
+          "shields",
+          valueAt(config, ["shields"]),
+          addString(valueAt(config, ["shields"]), [
+            "block",
+            "user_notification",
+          ]),
+          includeCompliant,
+        ),
+      );
+    }
   }
   if (finding.validatorId === "checkBreachedPassword") {
     proposed.push(

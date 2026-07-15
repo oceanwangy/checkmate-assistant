@@ -173,6 +173,53 @@ describe("Auth0 actionable configuration reader", () => {
     expect(result.size).toBe(0);
   });
 
+  it("maps the account-lockout finding to the documented identifier-only mode", async () => {
+    const finding: NormalizedCheckmateFinding = {
+      id: "account-lockout",
+      validatorId: "checkBruteForce",
+      title: "Brute Force Protection",
+      status: "failed",
+      evidence: {
+        field: "enableAccountLockout",
+        value: "count_per_identifier_and_ip",
+      },
+      raw: {},
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            enabled: true,
+            shields: ["block", "user_notification"],
+            mode: "count_per_identifier_and_ip",
+            max_attempts: 10,
+            allowlist: [],
+          }),
+        ),
+      );
+
+    const result = await loadActionableConfiguration(
+      [finding],
+      config,
+      fetcher,
+    );
+
+    expect(result.get("account-lockout")).toEqual([
+      {
+        resourceType: "attack_protection",
+        resourceId: "checkBruteForce",
+        resourceName: "Brute Force Protection",
+        configPath: "mode",
+        currentValue: "count_per_identifier_and_ip",
+        targetValue: "count_per_identifier",
+      },
+    ]);
+  });
+
   it("creates exact application hardening changes from live client settings", async () => {
     const applicationName =
       "Test App (client_12345678) (First-Party Application)";

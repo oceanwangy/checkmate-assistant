@@ -100,13 +100,76 @@ interface MutableCall {
   body: Record<string, unknown>;
 }
 
+export interface ApprovedActionChange {
+  actionId: string;
+  change: ActionableChange;
+}
+
+function callsForActions(
+  actions: readonly ApprovedActionChange[],
+): ApiPlanCall[] {
+  const grouped = new Map<string, MutableCall>();
+  for (const action of actions) {
+    const { change } = action;
+    const endpoint = endpointFor(change);
+    const key = `${change.resourceType}:${endpoint}`;
+    let call = grouped.get(key);
+    if (!call) {
+      call = {
+        method: "PATCH",
+        endpoint,
+        resourceType: change.resourceType,
+        resourceId: change.resourceId,
+        resourceName: change.resourceName,
+        bodyStrategy:
+          change.resourceType === "connection"
+            ? "merge_live_connection_options"
+            : "merge_live_nested_objects",
+        actionIds: [],
+        preconditions: [],
+        body: {},
+      };
+      grouped.set(key, call);
+    }
+    if (!call.actionIds.includes(action.actionId)) {
+      call.actionIds.push(action.actionId);
+    }
+    call.preconditions.push({
+      path: change.configPath,
+      expectedValue: change.currentValue,
+    });
+    setNested(call.body, change.configPath, change.targetValue);
+  }
+  return [...grouped.values()].map((call, index) => ({
+    id: `api-call-${index + 1}`,
+    ...call,
+  }));
+}
+
+export function buildApiPlanFromActions(
+  sourceReport: string,
+  profile: "dev" | "prod",
+  generatedAt: string,
+  actions: readonly ApprovedActionChange[],
+): ApiPlan {
+  return apiPlanSchema.parse({
+    schemaVersion: 1,
+    generatedAt,
+    sourceReport,
+    profile,
+    calls: callsForActions(actions),
+    unchangedActionIds: [],
+    alreadyCompliantActionIds: [],
+  });
+}
+
 export function buildApiPlan(
   session: ReviewSession,
   profile: "dev" | "prod",
   generatedAt: string,
 ): ApiPlan {
-  const grouped = new Map<string, MutableCall>();
   const unchangedActionIds: string[] = [];
+  const approvedActions: ApprovedActionChange[] = [];
   for (const entry of session.decisions) {
     if (!entry.actionableChangeId) continue;
     if (entry.decision.status !== "approved") {
@@ -114,46 +177,18 @@ export function buildApiPlan(
       continue;
     }
     for (const change of entry.actionableChanges ?? []) {
-      const endpoint = endpointFor(change);
-      const key = `${change.resourceType}:${endpoint}`;
-      let call = grouped.get(key);
-      if (!call) {
-        call = {
-          method: "PATCH",
-          endpoint,
-          resourceType: change.resourceType,
-          resourceId: change.resourceId,
-          resourceName: change.resourceName,
-          bodyStrategy:
-            change.resourceType === "connection"
-              ? "merge_live_connection_options"
-              : "merge_live_nested_objects",
-          actionIds: [],
-          preconditions: [],
-          body: {},
-        };
-        grouped.set(key, call);
-      }
-      if (!call.actionIds.includes(entry.actionableChangeId)) {
-        call.actionIds.push(entry.actionableChangeId);
-      }
-      call.preconditions.push({
-        path: change.configPath,
-        expectedValue: change.currentValue,
+      approvedActions.push({
+        actionId: entry.actionableChangeId,
+        change,
       });
-      setNested(call.body, change.configPath, change.targetValue);
     }
   }
-  const calls = [...grouped.values()].map((call, index) => ({
-    id: `api-call-${index + 1}`,
-    ...call,
-  }));
   return apiPlanSchema.parse({
     schemaVersion: 1,
     generatedAt,
     sourceReport: session.report.sourceReport,
     profile,
-    calls,
+    calls: callsForActions(approvedActions),
     unchangedActionIds,
     alreadyCompliantActionIds: [],
   });

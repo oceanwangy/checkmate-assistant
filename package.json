@@ -4,6 +4,10 @@
   "private": true,
   "description": "Read-only remediation workflow driven by Auth0 CheckMate reports",
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "bin": {
     "checkmate-assistant": "dist/src/cli.js"
   },
@@ -11,13 +15,25 @@
     "node": ">=20.18.3"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-ui-assets.mjs",
+    "build": "npm run build:core && npm run build:app && npm run build:mcp && npm run build:chat",
+    "build:app": "tsc -p tsconfig.json && node scripts/copy-ui-assets.mjs",
+    "build:chat": "npm run build --workspace @checkmate-assistant/chat",
+    "build:core": "npm run build --workspace @checkmate-assistant/core",
+    "build:mcp": "npm run build --workspace @checkmate-assistant/mcp-server",
+    "predev": "npm run build:core",
     "dev": "tsx src/cli.ts",
+    "preeval:prompts": "npm run build:core",
     "eval:prompts": "tsx src/evaluation/evaluate-report-prompts.ts",
     "lint": "eslint .",
+    "prechat": "npm run build:core && npm run build:app && npm run build:mcp && npm run build:chat",
+    "chat": "npm run start --workspace @checkmate-assistant/chat --",
+    "premcp": "npm run build:core && npm run build:mcp",
+    "mcp": "npm run start --workspace @checkmate-assistant/mcp-server --",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "pretest": "npm run build:core",
     "test": "vitest run",
+    "pretest:watch": "npm run build:core",
     "test:watch": "vitest"
   },
   "dependencies": {
