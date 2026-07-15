@@ -159,6 +159,8 @@ function changeDescription(change: ActionableChange): string {
       return `Disable cross-origin authentication on ${change.resourceName}.`;
     case "grant_types":
       return `Remove the Implicit grant type from ${change.resourceName}.`;
+    case "callbacks":
+      return `Remove the insecure callback URL from ${change.resourceName}.`;
     case "enabled":
       return `Enable ${change.resourceName}.`;
     case "shields":

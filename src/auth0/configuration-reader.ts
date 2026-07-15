@@ -28,6 +28,7 @@ const clientSchema = z
     cross_origin_auth: z.boolean().optional(),
     cross_origin_authentication: z.boolean().optional(),
     grant_types: z.array(z.string()).optional(),
+    callbacks: z.array(z.string()).optional(),
   })
   .passthrough();
 const clientsSchema = z.array(clientSchema);
@@ -66,6 +67,7 @@ const CLIENT_VALIDATORS = new Set([
   "checkJWTSignAlg",
   "checkCrossOriginAuthentication",
   "checkGrantTypes",
+  "checkAllowedCallbacks",
 ]);
 
 function tenantBaseUrl(domain: string): string {
@@ -400,6 +402,27 @@ function clientChanges(
           "grant_types",
           current,
           target,
+          includeCompliant,
+        ),
+      );
+    }
+  }
+  if (finding.validatorId === "checkAllowedCallbacks" && client.callbacks) {
+    const evidence = record(finding.evidence);
+    const insecureCallback =
+      evidence?.field === "insecure_callbacks" &&
+      typeof evidence.value === "string"
+        ? evidence.value
+        : undefined;
+    if (insecureCallback && client.callbacks.includes(insecureCallback)) {
+      proposed.push(
+        change(
+          "client",
+          client.client_id,
+          client.name,
+          "callbacks",
+          client.callbacks,
+          client.callbacks.filter((callback) => callback !== insecureCallback),
           includeCompliant,
         ),
       );

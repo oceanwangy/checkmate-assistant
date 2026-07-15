@@ -248,6 +248,30 @@ describe("Auth0 actionable configuration reader", () => {
         affectedResource: { name: applicationName },
         raw: {},
       },
+      {
+        id: "insecure-callback-3000",
+        validatorId: "checkAllowedCallbacks",
+        title: "Application Allowed Callbacks",
+        status: "failed",
+        affectedResource: { name: applicationName },
+        evidence: {
+          field: "insecure_callbacks",
+          value: "http://localhost:3000/auth/callback",
+        },
+        raw: {},
+      },
+      {
+        id: "insecure-callback-4000",
+        validatorId: "checkAllowedCallbacks",
+        title: "Application Allowed Callbacks",
+        status: "failed",
+        affectedResource: { name: applicationName },
+        evidence: {
+          field: "insecure_callbacks",
+          value: "http://localhost:4000/auth/callback",
+        },
+        raw: {},
+      },
     ];
     const fetcher = vi
       .fn<Fetcher>()
@@ -267,6 +291,11 @@ describe("Auth0 actionable configuration reader", () => {
               },
               cross_origin_auth: true,
               grant_types: ["authorization_code", "implicit", "refresh_token"],
+              callbacks: [
+                "https://test.example.com/auth/callback",
+                "http://localhost:3000/auth/callback",
+                "http://localhost:4000/auth/callback",
+              ],
             },
           ]),
         ),
@@ -306,6 +335,40 @@ describe("Auth0 actionable configuration reader", () => {
         configPath: "grant_types",
         currentValue: ["authorization_code", "implicit", "refresh_token"],
         targetValue: ["authorization_code", "refresh_token"],
+      },
+    ]);
+    expect(result.get("insecure-callback-3000")).toEqual([
+      {
+        resourceType: "client",
+        resourceId: "client_12345678",
+        resourceName: "Test App",
+        configPath: "callbacks",
+        currentValue: [
+          "https://test.example.com/auth/callback",
+          "http://localhost:3000/auth/callback",
+          "http://localhost:4000/auth/callback",
+        ],
+        targetValue: [
+          "https://test.example.com/auth/callback",
+          "http://localhost:4000/auth/callback",
+        ],
+      },
+    ]);
+    expect(result.get("insecure-callback-4000")).toEqual([
+      {
+        resourceType: "client",
+        resourceId: "client_12345678",
+        resourceName: "Test App",
+        configPath: "callbacks",
+        currentValue: [
+          "https://test.example.com/auth/callback",
+          "http://localhost:3000/auth/callback",
+          "http://localhost:4000/auth/callback",
+        ],
+        targetValue: [
+          "https://test.example.com/auth/callback",
+          "http://localhost:3000/auth/callback",
+        ],
       },
     ]);
     const tokenBody = JSON.parse(

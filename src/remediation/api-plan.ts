@@ -88,6 +88,25 @@ function setNested(
   current[finalSegment] = value;
 }
 
+function setPlannedTarget(
+  body: Record<string, unknown>,
+  change: ActionableChange,
+): void {
+  if (
+    change.configPath === "callbacks" &&
+    Array.isArray(body.callbacks) &&
+    Array.isArray(change.targetValue)
+  ) {
+    const nextCallbacks = new Set(change.targetValue);
+    body.callbacks = body.callbacks.filter(
+      (callback): callback is string =>
+        typeof callback === "string" && nextCallbacks.has(callback),
+    );
+    return;
+  }
+  setNested(body, change.configPath, change.targetValue);
+}
+
 interface MutableCall {
   method: "PATCH";
   endpoint: string;
@@ -138,7 +157,7 @@ function callsForActions(
       path: change.configPath,
       expectedValue: change.currentValue,
     });
-    setNested(call.body, change.configPath, change.targetValue);
+    setPlannedTarget(call.body, change);
   }
   return [...grouped.values()].map((call, index) => ({
     id: `api-call-${index + 1}`,

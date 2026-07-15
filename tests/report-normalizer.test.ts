@@ -55,6 +55,27 @@ describe("CheckMate report normalisation", () => {
     });
   });
 
+  it("keeps long flattened finding IDs unique", () => {
+    const shared = {
+      finding_name: "checkAllowedCallbacks",
+      finding_title: "Application Allowed Callbacks",
+      severity: "High",
+      name: "Assistant0 (report_client_12345678) (First-Party Application)",
+      field: "insecure_callbacks",
+      message: "An insecure callback URL is allowed.",
+    };
+    const report = normalizeCheckmateReport([
+      { ...shared, value: "http://localhost:3000/auth/callback" },
+      { ...shared, value: "http://localhost:4000/auth/callback" },
+    ]);
+
+    expect(report.findings[0]?.id).not.toBe(report.findings[1]?.id);
+    expect(report.findings.map((finding) => finding.id)).toEqual([
+      expect.stringMatching(/-1$/),
+      expect.stringMatching(/-2$/),
+    ]);
+  });
+
   it("accepts wrapped reports and unknown fields", () => {
     const report = normalizeCheckmateReport({
       tenant: "tenant.example.auth0.com",

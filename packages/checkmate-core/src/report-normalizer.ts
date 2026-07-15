@@ -140,12 +140,14 @@ function normalizeOne(
       : explicitStatus;
   const resource = affectedResource(source);
   const field = stringValue(source, ["field"]);
-  const stablePart =
-    stringValue(source, ["id", "finding_id"]) ??
-    [validatorId, field, resource?.id ?? resource?.name, String(index + 1)]
-      .filter(Boolean)
-      .join(":");
-  const id = slug(stablePart) || `finding-${index + 1}`;
+  const explicitId = stringValue(source, ["id", "finding_id"]);
+  const generatedId = [validatorId, field, resource?.id ?? resource?.name]
+    .filter(Boolean)
+    .join(":");
+  const generatedPrefix = slug(generatedId).slice(0, 72).replace(/-$/g, "");
+  const id = explicitId
+    ? slug(explicitId) || `finding-${index + 1}`
+    : `${generatedPrefix || "finding"}-${index + 1}`;
   const severity =
     stringValue(source, ["severity"]) ??
     (parent ? stringValue(parent, ["severity"]) : undefined);
