@@ -36,7 +36,7 @@ describe("CheckMate runner", () => {
     expect(runtime.entrypoint).toMatch(
       /node_modules\/@auth0\/auth0-checkmate\/bin\/index\.js$/,
     );
-    expect(result.metadata.checkmateVersion).toBe("1.8.1");
+    expect(result.metadata.checkmateVersion).toBe("1.8.3");
   });
 
   it("does not forward unrelated credentials from the parent environment", () => {

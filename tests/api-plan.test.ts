@@ -182,4 +182,77 @@ describe("Auth0 API plan", () => {
       }),
     ]);
   });
+
+  it("merges selected callback removals into one client PATCH", () => {
+    const review = session();
+    const currentCallbacks = [
+      "http://localhost:3000/auth/callback",
+      "http://localhost:4000/auth/callback",
+      "https://assistant.example.com/auth/callback",
+    ];
+    review.decisions = [
+      {
+        checkmateFindingId: "callback-3000",
+        checkmateTitle: "Application Allowed Callbacks",
+        checkmateStatus: "failed",
+        analysis,
+        answers: [],
+        actionableChangeId: "action-callback-3000",
+        actionableChanges: [
+          {
+            resourceType: "client",
+            resourceId: "client_assistant0",
+            resourceName: "Assistant0",
+            configPath: "callbacks",
+            currentValue: currentCallbacks,
+            targetValue: currentCallbacks.filter(
+              (callback) => !callback.includes("localhost:3000"),
+            ),
+          },
+        ],
+        decision: {
+          status: "approved",
+          rationale: "Remove the local callback.",
+          decidedAt: "2026-07-25T10:00:00.000Z",
+        },
+      },
+      {
+        checkmateFindingId: "callback-4000",
+        checkmateTitle: "Application Allowed Callbacks",
+        checkmateStatus: "failed",
+        analysis,
+        answers: [],
+        actionableChangeId: "action-callback-4000",
+        actionableChanges: [
+          {
+            resourceType: "client",
+            resourceId: "client_assistant0",
+            resourceName: "Assistant0",
+            configPath: "callbacks",
+            currentValue: currentCallbacks,
+            targetValue: currentCallbacks.filter(
+              (callback) => !callback.includes("localhost:4000"),
+            ),
+          },
+        ],
+        decision: {
+          status: "approved",
+          rationale: "Remove the local callback.",
+          decidedAt: "2026-07-25T10:00:00.000Z",
+        },
+      },
+    ];
+
+    const plan = buildApiPlan(review, "dev", "2026-07-25T10:01:00.000Z");
+
+    expect(plan.calls).toEqual([
+      expect.objectContaining({
+        endpoint: "/api/v2/clients/client_assistant0",
+        actionIds: ["action-callback-3000", "action-callback-4000"],
+        body: {
+          callbacks: ["https://assistant.example.com/auth/callback"],
+        },
+      }),
+    ]);
+  });
 });

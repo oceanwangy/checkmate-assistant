@@ -36,7 +36,7 @@ export default tseslint.config(
     languageOptions: { globals: globals.node },
   },
   {
-    files: ["src/ui/public/**/*.js", "apps/checkmate-chat/public/**/*.js"],
+    files: ["src/ui/public/**/*.js"],
     languageOptions: { globals: globals.browser },
   },
   prettier,

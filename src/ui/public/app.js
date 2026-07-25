@@ -8,6 +8,18 @@ const node = (tag, className, text) => {
   return element;
 };
 
+function findingScope() {
+  const validators = ui.state.reportValidatorCount;
+  const details = ui.state.reportFindingCount;
+  if (ui.state.findingStatus === "failed") {
+    return `${validators} failed validator${validators === 1 ? "" : "s"} with ${details} failed detail item${details === 1 ? "" : "s"}`;
+  }
+  if (ui.state.findingStatus === "warning") {
+    return `${validators} warning validator${validators === 1 ? "" : "s"} with ${details} warning detail item${details === 1 ? "" : "s"}`;
+  }
+  return `${validators} validators with ${details} reported detail item${details === 1 ? "" : "s"}`;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -41,7 +53,7 @@ function renderProgress() {
       ? "Ready to scan"
       : ui.state.triaged
         ? `${completed} of ${total} reviewed`
-        : `AI interpreting ${ui.state.reportFindingCount} findings`;
+        : `AI interpreting ${findingScope()}`;
   byId("progress-bar").style.width =
     `${total ? (completed / total) * 100 : 0}%`;
 }
@@ -165,6 +177,29 @@ function displayValue(value) {
   if (value === null) return "Not set";
   if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
   return String(value);
+}
+
+function removedCallbackUrl(change) {
+  if (
+    !Array.isArray(change.currentValue) ||
+    !Array.isArray(change.targetValue)
+  ) {
+    return "Callback URL";
+  }
+  return (
+    change.currentValue.find(
+      (value) =>
+        typeof value === "string" && !change.targetValue.includes(value),
+    ) || "Callback URL"
+  );
+}
+
+function callbackLabel(value) {
+  try {
+    return `${new URL(value).host} callback`;
+  } catch {
+    return "Callback URL";
+  }
 }
 
 function closePlanReview() {
@@ -490,11 +525,7 @@ function openPlanReview() {
   close.focus();
 }
 
-function renderDecisionOptions(
-  finding,
-  adminNotes,
-  applicationCheckboxes = [],
-) {
+function renderDecisionOptions(finding, adminNotes, selectionCheckboxes = []) {
   const options = node("div", "decision-options");
   const accepted =
     finding.decision === "approved" || finding.decision === "mixed";
@@ -506,7 +537,9 @@ function renderDecisionOptions(
       ? "✓ Selection saved"
       : finding.selectionMode === "applications"
         ? "Accept for selected applications"
-        : "Accept AI suggestion",
+        : finding.selectionMode === "changes"
+          ? "Accept selected removals"
+          : "Accept AI suggestion",
   );
   const unchanged = node(
     "button",
@@ -517,13 +550,18 @@ function renderDecisionOptions(
   unchanged.type = "button";
   accept.addEventListener("click", () => {
     const rationale = adminNotes.value.trim();
-    const selectedActionIds = applicationCheckboxes.length
-      ? applicationCheckboxes
+    const selectedActionIds = selectionCheckboxes.length
+      ? selectionCheckboxes
           .filter((checkbox) => checkbox.checked)
           .map((checkbox) => checkbox.value)
       : finding.actionableChanges.map((change) => change.actionId);
     if (selectedActionIds.length === 0) {
-      toast("Select at least one application, or remain unchanged.", true);
+      toast(
+        finding.selectionMode === "applications"
+          ? "Select at least one application, or remain unchanged."
+          : "Select at least one callback URL, or remain unchanged.",
+        true,
+      );
       return;
     }
     saveDecision(
@@ -574,9 +612,9 @@ function createFindingCard(finding, index) {
     node(
       "h3",
       "",
-      finding.selectionMode === "applications"
-        ? "Recommended security change"
-        : "AI-suggested changes",
+      finding.selectionMode === "single"
+        ? "AI-suggested changes"
+        : "Recommended security change",
     ),
   );
   addBulletList(suggestion, finding.analysis.remediationConsiderations);
@@ -584,17 +622,36 @@ function createFindingCard(finding, index) {
   reason.append(node("strong", "", "Why this matters"));
   addBulletList(reason, finding.analysis.whyItMatters);
   suggestion.append(reason);
-  const applicationCheckboxes = [];
-  if (finding.selectionMode === "applications") {
+  const selectionCheckboxes = [];
+  if (
+    finding.selectionMode === "applications" ||
+    finding.selectionMode === "changes"
+  ) {
     const applications = node("fieldset", "application-selection");
     if (finding.actionableChanges.length > 3) {
       applications.classList.add("scrollable");
     }
-    applications.append(node("legend", "", "Select applications"));
+    applications.append(
+      node(
+        "legend",
+        "",
+        finding.selectionMode === "applications"
+          ? "Select applications"
+          : "Select callback URLs",
+      ),
+    );
     const selected = new Set(finding.selectedActionIds || []);
-    for (const change of [...finding.actionableChanges].sort((left, right) =>
-      left.resourceName.localeCompare(right.resourceName),
-    )) {
+    const selectableChanges = [...finding.actionableChanges].sort(
+      (left, right) => {
+        if (finding.selectionMode === "applications") {
+          return left.resourceName.localeCompare(right.resourceName);
+        }
+        return removedCallbackUrl(left).localeCompare(
+          removedCallbackUrl(right),
+        );
+      },
+    );
+    for (const change of selectableChanges) {
       const label = node("label", "application-option");
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
@@ -602,16 +659,24 @@ function createFindingCard(finding, index) {
       checkbox.checked = finding.reviewed
         ? selected.has(change.actionId)
         : true;
-      applicationCheckboxes.push(checkbox);
+      selectionCheckboxes.push(checkbox);
       const text = node("span", "application-option-text");
-      text.append(
-        node("strong", "", change.resourceName),
-        node(
-          "small",
-          "",
-          `${displayValue(change.currentValue)} → ${displayValue(change.targetValue)}`,
-        ),
-      );
+      if (finding.selectionMode === "changes") {
+        const callbackUrl = removedCallbackUrl(change);
+        text.append(
+          node("strong", "", callbackLabel(callbackUrl)),
+          node("small", "", callbackUrl),
+        );
+      } else {
+        text.append(
+          node("strong", "", change.resourceName),
+          node(
+            "small",
+            "",
+            `${displayValue(change.currentValue)} → ${displayValue(change.targetValue)}`,
+          ),
+        );
+      }
       label.append(checkbox, text);
       applications.append(label);
     }
@@ -646,7 +711,7 @@ function createFindingCard(finding, index) {
   card.append(
     suggestion,
     notes,
-    renderDecisionOptions(finding, adminNotes, applicationCheckboxes),
+    renderDecisionOptions(finding, adminNotes, selectionCheckboxes),
   );
   return card;
 }
@@ -756,10 +821,139 @@ function renderTriageLoading() {
     node(
       "p",
       "",
-      `Checking ${ui.state.reportFindingCount} findings against live tenant settings and preparing specific recommendations.`,
+      `Reviewing ${findingScope()} and validating supported recommendations against live tenant settings.`,
     ),
   );
   byId("workspace").replaceChildren(page);
+}
+
+function postureRatingLabel(rating) {
+  return `${rating.charAt(0).toUpperCase()}${rating.slice(1)}`;
+}
+
+function createPosturePanel() {
+  const posture = ui.state.posture;
+  const panel = node("section", "posture-panel");
+  panel.id = "posture";
+  if (!posture) return panel;
+
+  const heading = node("div", "posture-heading");
+  heading.append(
+    node("div", "eyebrow", "Weighted security measurement"),
+    node("h2", "", "Auth0 tenant configuration posture"),
+    node(
+      "p",
+      "",
+      "Current posture comes from the latest CheckMate report. Projected posture shows the effect of accepted suggestions before any tenant change is made.",
+    ),
+  );
+
+  const scores = node("div", "posture-scores");
+  const scoreCard = (label, snapshot, detail) => {
+    const card = node("article", `posture-score ${snapshot.rating}`);
+    const top = node("div", "posture-score-top");
+    top.append(
+      node("span", "posture-score-label", label),
+      node(
+        "span",
+        `posture-rating ${snapshot.rating}`,
+        postureRatingLabel(snapshot.rating),
+      ),
+    );
+    const value = node("div", "posture-score-value");
+    value.append(
+      node("strong", "", String(snapshot.score)),
+      node("span", "", "points"),
+    );
+    card.append(top, value, node("p", "", detail));
+    return card;
+  };
+  scores.append(
+    scoreCard("Current", posture.current, "Latest CheckMate evidence"),
+    scoreCard(
+      "Projected",
+      posture.projected,
+      posture.delta > 0
+        ? `+${posture.delta} points from accepted suggestions`
+        : "No score movement selected yet",
+    ),
+  );
+
+  const foundationalRemaining =
+    posture.projected.openFoundationalControlCount || 0;
+  const highRemaining = posture.projected.openHighControlCount || 0;
+  const remaining = foundationalRemaining + highRemaining;
+  const foot = node("div", "posture-foot");
+  foot.append(
+    node(
+      "p",
+      "",
+      `Model ${posture.modelVersion}. ${posture.catalogControlCount} baseline controls are weighted by security importance; report rows are not counted equally.`,
+    ),
+    node(
+      "p",
+      "",
+      `${posture.unscoredValidatorCount} capability-dependent or informational report validators are excluded from posture points. Optional controls such as DPoP do not reduce the score.`,
+    ),
+    node(
+      "p",
+      "",
+      remaining
+        ? `${foundationalRemaining} foundational and ${highRemaining} high-impact controls remain as additional hardening opportunities. They do not override the points-based colour.`
+        : "No foundational or high-impact baseline controls remain open.",
+    ),
+    node(
+      "p",
+      "",
+      "Colour thresholds: Red below 50 points, Amber from 50 to 69, and Green from 70.",
+    ),
+    node(
+      "p",
+      "posture-caveat",
+      "Selecting a suggestion changes only this projection. Current posture changes only after execution and a new CheckMate scan.",
+    ),
+  );
+  panel.append(heading, scores, foot);
+  return panel;
+}
+
+function createAdditionalControlsPanel() {
+  const controls = (ui.state.posture?.projected?.openControls || []).filter(
+    (control) => !control.recommendationAvailable,
+  );
+  if (!controls.length) return null;
+  const panel = node("section", "additional-controls");
+  panel.append(
+    node("div", "eyebrow", "Additional recommendations"),
+    node("h2", "", "Important controls to review separately"),
+    node(
+      "p",
+      "additional-controls-intro",
+      "These controls still affect tenant hardening, but they do not currently map to a safe deterministic API change. Review them against platform support and business requirements.",
+    ),
+  );
+  const list = node("div", "additional-controls-list");
+  for (const control of controls) {
+    const item = node("article", "additional-control");
+    const heading = node("div", "additional-control-heading");
+    heading.append(
+      node("h3", "", control.title),
+      node("span", "additional-control-importance", control.importance),
+    );
+    item.append(
+      heading,
+      node("p", "", control.guidance),
+      node("span", "manual-review-label", "Manual review"),
+    );
+    list.append(item);
+  }
+  panel.append(list);
+  return panel;
+}
+
+function renderPosture() {
+  const current = byId("posture");
+  if (current) current.replaceWith(createPosturePanel());
 }
 
 function renderPage() {
@@ -774,7 +968,7 @@ function renderPage() {
     node(
       "p",
       "",
-      `AI interpreted ${ui.state.reportFindingCount} CheckMate findings and verified each recommendation against your tenant's current configuration.`,
+      `AI reviewed ${findingScope()}. Supported recommendations were verified against your tenant's current configuration.`,
     ),
   );
   const scanAgain = node("button", "scan-again-button", "Run new scan");
@@ -801,7 +995,10 @@ function renderPage() {
   }
   const submission = node("section", "submission-panel");
   submission.id = "submission";
-  workspace.append(intro, list, submission);
+  workspace.append(intro, createPosturePanel());
+  workspace.append(list, submission);
+  const additionalControls = createAdditionalControlsPanel();
+  if (additionalControls) workspace.append(additionalControls);
   renderSubmission();
 }
 
@@ -846,6 +1043,7 @@ async function saveDecision(
       }),
     }).then((result) => result.state);
     renderProgress();
+    renderPosture();
     replaceCard(finding.key);
     renderSubmission();
     toast("Decision saved.");

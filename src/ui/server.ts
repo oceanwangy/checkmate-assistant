@@ -58,6 +58,8 @@ import {
   writeReviewSession,
 } from "../remediation/review-writer.js";
 import { toErrorMessage } from "../utils/errors.js";
+import { evaluatePosture } from "../posture/evaluator.js";
+import { POSTURE_REVIEW_GUIDANCE } from "../posture/control-catalog.js";
 
 const HOST = "127.0.0.1";
 const MAX_BODY_BYTES = 1_000_000;
@@ -119,7 +121,7 @@ interface CachedRecommendation {
   key: string;
   title: string;
   analysis: AiFindingAnalysis;
-  selectionMode: "single" | "applications";
+  selectionMode: "single" | "applications" | "changes";
   actions: Array<{
     actionId: string;
     finding: NormalizedCheckmateFinding;
@@ -276,12 +278,14 @@ export async function startUiServer(
   let report: Awaited<ReturnType<typeof loadCheckmateReport>> | undefined;
   let findings: NormalizedCheckmateFinding[] = [];
   let cachedFindings: CachedFinding[] = [];
+  let reportValidatorCount = 0;
   let profile: CheckmateConfig | undefined;
   let outputPath: string | undefined;
   let session: ReviewSession | undefined;
   let triaged = false;
   let recommendations: CachedRecommendation[] = [];
   const recommendationMap = new Map<string, CachedRecommendation>();
+  const postureActionIdsByValidator = new Map<string, Set<string>>();
   let triagePromise: Promise<void> | undefined;
   let submittedPackage: SubmittedChangePackage | undefined;
   let execution: ApiExecutionResult | undefined;
@@ -329,6 +333,9 @@ export async function startUiServer(
     report = loaded;
     findings = selectedFindings;
     cachedFindings = findings.map((finding) => ({ finding }));
+    reportValidatorCount = new Set(
+      selectedFindings.map((finding) => finding.validatorId ?? finding.id),
+    ).size;
     profile = resolveReviewProfile(
       requestedProfile ?? options.profile,
       loaded.sourcePath,
@@ -339,6 +346,7 @@ export async function startUiServer(
     triaged = false;
     recommendations = [];
     recommendationMap.clear();
+    postureActionIdsByValidator.clear();
     triagePromise = undefined;
     submittedPackage = undefined;
     execution = undefined;
@@ -445,6 +453,59 @@ export async function startUiServer(
       recommendations.push(recommendation);
       recommendationMap.set(recommendation.key, recommendation);
     }
+    const callbackActions = [...actionMap.values()].flatMap((candidate) => {
+      if (
+        candidate.change.resourceType !== "client" ||
+        candidate.change.configPath !== "callbacks"
+      ) {
+        return [];
+      }
+      const item = cachedFindings.find(
+        ({ finding }) => finding.id === candidate.findingId,
+      );
+      if (!item) return [];
+      deterministicActionIds.add(candidate.actionId);
+      return [
+        {
+          actionId: candidate.actionId,
+          finding: item.finding,
+          actionableChange: candidate.change,
+        },
+      ];
+    });
+    const callbacksByClient = new Map<string, typeof callbackActions>();
+    for (const action of callbackActions) {
+      const resourceId = action.actionableChange.resourceId;
+      const grouped = callbacksByClient.get(resourceId) ?? [];
+      grouped.push(action);
+      callbacksByClient.set(resourceId, grouped);
+    }
+    for (const actions of callbacksByClient.values()) {
+      const first = actions[0];
+      if (!first) continue;
+      const resourceName = first.actionableChange.resourceName;
+      const recommendation: CachedRecommendation = {
+        key: `callbacks-${first.actionId}`,
+        title: `Remove insecure callback URLs from ${resourceName}`,
+        selectionMode: "changes",
+        actions,
+        analysis: {
+          whatItMeans: [
+            `${resourceName} allows callback URLs that CheckMate identified as insecure.`,
+          ],
+          whyItMatters: [
+            "Removing development callback URLs reduces the chance of authentication responses being redirected to unintended local endpoints.",
+            "All other configured callback URLs remain unchanged.",
+          ],
+          questions: [],
+          remediationConsiderations: [
+            `Remove the selected insecure callback URLs from ${resourceName}.`,
+          ],
+        },
+      };
+      recommendations.push(recommendation);
+      recommendationMap.set(recommendation.key, recommendation);
+    }
     for (const selected of items) {
       const actionCandidate = actionMap.get(selected.actionId);
       if (
@@ -479,6 +540,17 @@ export async function startUiServer(
       recommendations.push(recommendation);
       recommendationMap.set(recommendation.key, recommendation);
     }
+    postureActionIdsByValidator.clear();
+    for (const recommendation of recommendations) {
+      for (const action of recommendation.actions) {
+        const validatorId = action.finding.validatorId;
+        if (!validatorId) continue;
+        const actionIds =
+          postureActionIdsByValidator.get(validatorId) ?? new Set();
+        actionIds.add(action.actionId);
+        postureActionIdsByValidator.set(validatorId, actionIds);
+      }
+    }
     triaged = true;
   };
 
@@ -502,9 +574,10 @@ export async function startUiServer(
             (change) =>
               !(
                 change.resourceType === "client" &&
-                deterministicApplicationGroups.some(
-                  (group) => group.configPath === change.configPath,
-                )
+                (change.configPath === "callbacks" ||
+                  deterministicApplicationGroups.some(
+                    (group) => group.configPath === change.configPath,
+                  ))
               ),
           );
           return filtered.length > 0 ? [[findingId, filtered]] : [];
@@ -529,127 +602,194 @@ export async function startUiServer(
     }
   };
 
-  const state = () => ({
-    hasReport: Boolean(report),
-    scanning,
-    availableProfiles,
-    ...(profile ? { selectedProfile: profile.profile } : {}),
-    ...(report
-      ? {
-          report: {
-            file: path.basename(report.sourcePath),
-            ...(report.tenant
-              ? { tenant: redactText(report.tenant, sensitiveValues) }
-              : {}),
-            ...(report.generatedAt ? { generatedAt: report.generatedAt } : {}),
-          },
-        }
-      : {}),
-    ...(outputPath ? { outputFile: path.basename(outputPath) } : {}),
-    submissionReady: allDecisionsSaved(),
-    submitted: Boolean(submittedPackage),
-    canExecute:
-      Boolean(submittedPackage?.dev.plan.calls.length) &&
-      submittedPackage?.dev.apiValidation.valid === true &&
-      submittedPackage?.dev.terraformValidation.valid === true &&
-      execution?.status !== "succeeded",
-    executing,
-    ...(submittedPackage
-      ? {
-          changePackage: {
-            directory: path.basename(submittedPackage.paths.directory),
-            dev: {
-              apiFile: path.relative(
-                submittedPackage.paths.directory,
-                submittedPackage.paths.dev.apiPlan,
-              ),
-              terraformFile: path.relative(
-                submittedPackage.paths.directory,
-                submittedPackage.paths.dev.terraform,
-              ),
-              plan: submittedPackage.dev.plan,
-              apiPlanSha256: submittedPackage.dev.apiPlanSha256,
-              apiValidation: submittedPackage.dev.apiValidation,
-              terraformValidation: submittedPackage.dev.terraformValidation,
-            },
-            prod: {
-              apiFile: path.relative(
-                submittedPackage.paths.directory,
-                submittedPackage.paths.prod.apiPlan,
-              ),
-              terraformFile: path.relative(
-                submittedPackage.paths.directory,
-                submittedPackage.paths.prod.terraform,
-              ),
-              plan: submittedPackage.prod.plan,
-              apiPlanSha256: submittedPackage.prod.apiPlanSha256,
-              apiValidation: submittedPackage.prod.apiValidation,
-              terraformValidation: submittedPackage.prod.terraformValidation,
-            },
-          },
-        }
-      : {}),
-    ...(execution ? { execution } : {}),
-    triaged,
-    reportFindingCount: cachedFindings.length,
-    progress: {
-      completed: recommendations.filter((recommendation) =>
-        recommendation.actions.every((action) =>
-          session?.decisions.some(
-            (decision) => decision.actionableChangeId === action.actionId,
-          ),
+  const state = () => {
+    const projectedValidatorProgress = new Map<string, number>();
+    for (const [validatorId, actionIds] of postureActionIdsByValidator) {
+      const approved = [...actionIds].filter((actionId) =>
+        session?.decisions.some(
+          (decision) =>
+            decision.actionableChangeId === actionId &&
+            decision.decision.status === "approved",
         ),
-      ).length,
-      total: recommendations.length,
-    },
-    findings: recommendations.map((recommendation) => {
-      const { analysis } = recommendation;
-      const finding = recommendation.actions[0]!.finding;
-      const saved = recommendation.actions.flatMap((action) => {
-        const entry = session?.decisions.find(
-          (decision) => decision.actionableChangeId === action.actionId,
-        );
-        return entry ? [entry] : [];
-      });
-      const reviewed = saved.length === recommendation.actions.length;
-      const selectedActionIds = saved
-        .filter((entry) => entry.decision.status === "approved")
-        .flatMap((entry) =>
-          entry.actionableChangeId ? [entry.actionableChangeId] : [],
-        );
-      const decision = reviewed
-        ? selectedActionIds.length === 0
-          ? "accepted_risk"
-          : selectedActionIds.length === recommendation.actions.length
-            ? "approved"
-            : "mixed"
-        : undefined;
-      const adminNote =
-        saved.find((entry) => entry.decision.status === "approved")?.decision
-          .adminNote ?? saved[0]?.decision.adminNote;
-      return {
-        key: recommendation.key,
-        title: redactText(recommendation.title, sensitiveValues),
-        validatorTitle: redactText(finding.title, sensitiveValues),
-        status: finding.status,
-        ...(finding.severity
-          ? { severity: redactText(finding.severity, sensitiveValues) }
-          : {}),
-        analysis,
-        selectionMode: recommendation.selectionMode,
-        actionableChanges: recommendation.actions.map((action) => ({
-          actionId: action.actionId,
-          ...action.actionableChange,
-        })),
-        reviewed,
-        selectedActionIds,
-        ...(adminNote
-          ? { adminNote: redactText(adminNote, sensitiveValues) }
-          : {}),
-        ...(decision ? { decision } : {}),
-      };
-    }),
-  });
+      ).length;
+      if (actionIds.size > 0) {
+        projectedValidatorProgress.set(validatorId, approved / actionIds.size);
+      }
+    }
+    const posture = report
+      ? evaluatePosture(report.findings, { projectedValidatorProgress })
+      : undefined;
+    const projectedOpenControls = posture
+      ? [
+          ...posture.projected.openFoundationalControls.map((control) => ({
+            ...control,
+            importance: "Foundational" as const,
+          })),
+          ...posture.projected.openHighControls.map((control) => ({
+            ...control,
+            importance: "High impact" as const,
+          })),
+        ].map(({ validatorId, title, importance }) => ({
+          title,
+          importance,
+          guidance:
+            POSTURE_REVIEW_GUIDANCE[validatorId] ??
+            "Review this control against the tenant's technical and business requirements.",
+          recommendationAvailable: postureActionIdsByValidator.has(validatorId),
+        }))
+      : [];
+    const publicPosture = posture
+      ? {
+          modelVersion: posture.modelVersion,
+          evidenceBasis: posture.evidenceBasis,
+          current: {
+            score: posture.current.score,
+            rating: posture.current.rating,
+            openFoundationalControlCount:
+              posture.current.openFoundationalControls.length,
+            openHighControlCount: posture.current.openHighControls.length,
+          },
+          projected: {
+            score: posture.projected.score,
+            rating: posture.projected.rating,
+            openFoundationalControlCount:
+              posture.projected.openFoundationalControls.length,
+            openHighControlCount: posture.projected.openHighControls.length,
+            ...(triaged ? { openControls: projectedOpenControls } : {}),
+          },
+          delta: posture.delta,
+          catalogControlCount: posture.catalogControlCount,
+          reportedControlCount: posture.reportedControlCount,
+          unscoredValidatorCount: posture.unscoredValidatorIds.length,
+        }
+      : undefined;
+    return {
+      hasReport: Boolean(report),
+      scanning,
+      availableProfiles,
+      ...(profile ? { selectedProfile: profile.profile } : {}),
+      ...(report
+        ? {
+            report: {
+              file: path.basename(report.sourcePath),
+              ...(report.tenant
+                ? { tenant: redactText(report.tenant, sensitiveValues) }
+                : {}),
+              ...(report.generatedAt
+                ? { generatedAt: report.generatedAt }
+                : {}),
+            },
+          }
+        : {}),
+      ...(outputPath ? { outputFile: path.basename(outputPath) } : {}),
+      submissionReady: allDecisionsSaved(),
+      submitted: Boolean(submittedPackage),
+      canExecute:
+        Boolean(submittedPackage?.dev.plan.calls.length) &&
+        submittedPackage?.dev.apiValidation.valid === true &&
+        submittedPackage?.dev.terraformValidation.valid === true &&
+        execution?.status !== "succeeded",
+      executing,
+      ...(submittedPackage
+        ? {
+            changePackage: {
+              directory: path.basename(submittedPackage.paths.directory),
+              dev: {
+                apiFile: path.relative(
+                  submittedPackage.paths.directory,
+                  submittedPackage.paths.dev.apiPlan,
+                ),
+                terraformFile: path.relative(
+                  submittedPackage.paths.directory,
+                  submittedPackage.paths.dev.terraform,
+                ),
+                plan: submittedPackage.dev.plan,
+                apiPlanSha256: submittedPackage.dev.apiPlanSha256,
+                apiValidation: submittedPackage.dev.apiValidation,
+                terraformValidation: submittedPackage.dev.terraformValidation,
+              },
+              prod: {
+                apiFile: path.relative(
+                  submittedPackage.paths.directory,
+                  submittedPackage.paths.prod.apiPlan,
+                ),
+                terraformFile: path.relative(
+                  submittedPackage.paths.directory,
+                  submittedPackage.paths.prod.terraform,
+                ),
+                plan: submittedPackage.prod.plan,
+                apiPlanSha256: submittedPackage.prod.apiPlanSha256,
+                apiValidation: submittedPackage.prod.apiValidation,
+                terraformValidation: submittedPackage.prod.terraformValidation,
+              },
+            },
+          }
+        : {}),
+      ...(execution ? { execution } : {}),
+      triaged,
+      findingStatus: options.status,
+      reportValidatorCount,
+      reportFindingCount: cachedFindings.length,
+      ...(publicPosture ? { posture: publicPosture } : {}),
+      progress: {
+        completed: recommendations.filter((recommendation) =>
+          recommendation.actions.every((action) =>
+            session?.decisions.some(
+              (decision) => decision.actionableChangeId === action.actionId,
+            ),
+          ),
+        ).length,
+        total: recommendations.length,
+      },
+      findings: recommendations.map((recommendation) => {
+        const { analysis } = recommendation;
+        const finding = recommendation.actions[0]!.finding;
+        const saved = recommendation.actions.flatMap((action) => {
+          const entry = session?.decisions.find(
+            (decision) => decision.actionableChangeId === action.actionId,
+          );
+          return entry ? [entry] : [];
+        });
+        const reviewed = saved.length === recommendation.actions.length;
+        const selectedActionIds = saved
+          .filter((entry) => entry.decision.status === "approved")
+          .flatMap((entry) =>
+            entry.actionableChangeId ? [entry.actionableChangeId] : [],
+          );
+        const decision = reviewed
+          ? selectedActionIds.length === 0
+            ? "accepted_risk"
+            : selectedActionIds.length === recommendation.actions.length
+              ? "approved"
+              : "mixed"
+          : undefined;
+        const adminNote =
+          saved.find((entry) => entry.decision.status === "approved")?.decision
+            .adminNote ?? saved[0]?.decision.adminNote;
+        return {
+          key: recommendation.key,
+          title: redactText(recommendation.title, sensitiveValues),
+          validatorTitle: redactText(finding.title, sensitiveValues),
+          status: finding.status,
+          ...(finding.severity
+            ? { severity: redactText(finding.severity, sensitiveValues) }
+            : {}),
+          analysis,
+          selectionMode: recommendation.selectionMode,
+          actionableChanges: recommendation.actions.map((action) => ({
+            actionId: action.actionId,
+            ...action.actionableChange,
+          })),
+          reviewed,
+          selectedActionIds,
+          ...(adminNote
+            ? { adminNote: redactText(adminNote, sensitiveValues) }
+            : {}),
+          ...(decision ? { decision } : {}),
+        };
+      }),
+    };
+  };
 
   const server = http.createServer((request, response) => {
     void (async () => {
@@ -798,13 +938,11 @@ export async function startUiServer(
           )
         ) {
           throw new Error(
-            "The selected application is not part of this recommendation.",
+            "The selected option is not part of this recommendation.",
           );
         }
         if (parsed.status === "approved" && selectedActionIds.size === 0) {
-          throw new Error(
-            "Select at least one application, or remain unchanged.",
-          );
+          throw new Error("Select at least one option, or remain unchanged.");
         }
         const decidedAt = now().toISOString();
         const adminNote = boundedUserText(

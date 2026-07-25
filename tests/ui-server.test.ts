@@ -206,14 +206,24 @@ describe("local review UI", () => {
       expect(initialText).not.toContain("never-return-this-secret");
       const initial = JSON.parse(initialText) as {
         triaged: boolean;
+        findingStatus: string;
+        reportValidatorCount: number;
         reportFindingCount: number;
+        posture: {
+          current: { score: number; rating: string };
+          projected: { score: number; rating: string };
+        };
         findings: unknown[];
       };
       expect(initial).toMatchObject({
         triaged: false,
+        findingStatus: "failed",
+        reportValidatorCount: 2,
         reportFindingCount: 3,
         findings: [],
       });
+      expect(initial.posture.current).toEqual(initial.posture.projected);
+      expect(initial.posture.current.score).toBeLessThan(100);
 
       const triageResponse = await fetch(`${running.url}/api/triage`, {
         method: "POST",
@@ -227,6 +237,16 @@ describe("local review UI", () => {
       expect(triageResponse.status).toBe(200);
       const triaged = (await triageResponse.json()) as {
         triaged: boolean;
+        posture: {
+          projected: {
+            openControls: Array<{
+              title: string;
+              importance: string;
+              guidance: string;
+              recommendationAvailable: boolean;
+            }>;
+          };
+        };
         findings: Array<{
           key: string;
           title: string;
@@ -253,8 +273,15 @@ describe("local review UI", () => {
           },
         ],
       });
-      expect(JSON.stringify(triaged)).not.toContain(
+      expect(JSON.stringify(triaged.findings)).not.toContain(
         "Management API user access",
+      );
+      expect(triaged.posture.projected.openControls).toContainEqual(
+        expect.objectContaining({
+          title: "Management API user access",
+          importance: "High impact",
+          recommendationAvailable: false,
+        }),
       );
       expect(triageFindings).toHaveBeenCalledOnce();
       const findingKey = triaged.findings[0]!.key;
@@ -274,12 +301,21 @@ describe("local review UI", () => {
       });
       expect(saveResponse.status).toBe(200);
       const savedState = (await saveResponse.json()) as {
-        state: { findings: Array<{ key: string; adminNote?: string }> };
+        state: {
+          posture: {
+            current: { score: number };
+            projected: { score: number };
+          };
+          findings: Array<{ key: string; adminNote?: string }>;
+        };
       };
       expect(
         savedState.state.findings.find((finding) => finding.key === findingKey)
           ?.adminNote,
       ).toBe("The current access is temporarily accepted.");
+      expect(savedState.state.posture.projected.score).toBe(
+        savedState.state.posture.current.score,
+      );
       const stored = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
       );
@@ -324,6 +360,17 @@ describe("local review UI", () => {
         }),
       });
       expect(secondSaveResponse.status).toBe(200);
+      const partiallyApproved = (await secondSaveResponse.json()) as {
+        state: {
+          posture: {
+            current: { score: number };
+            projected: { score: number };
+          };
+        };
+      };
+      expect(partiallyApproved.state.posture.projected.score).toBeGreaterThan(
+        partiallyApproved.state.posture.current.score,
+      );
       const completed = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
       );
@@ -649,6 +696,150 @@ describe("local review UI", () => {
           (decision) => decision.decision.adminNote === undefined,
         ),
       ).toBe(true);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("groups insecure callback removals by application with selectable URLs", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-ui-"));
+    const reportPath = path.join(directory, "callbacks.json");
+    await writeFile(
+      reportPath,
+      JSON.stringify([
+        {
+          finding_name: "checkAllowedCallbacks",
+          finding_title: "Application Allowed Callbacks",
+          status: "red",
+          severity: "High",
+          name: "Assistant0 (client_assistant0) (First-Party Application)",
+          field: "insecure_callbacks",
+          value: "http://localhost:3000/auth/callback",
+          message: "An insecure callback URL is allowed.",
+        },
+        {
+          finding_name: "checkAllowedCallbacks",
+          finding_title: "Application Allowed Callbacks",
+          status: "red",
+          severity: "High",
+          name: "Assistant0 (client_assistant0) (First-Party Application)",
+          field: "insecure_callbacks",
+          value: "http://localhost:4000/auth/callback",
+          message: "An insecure callback URL is allowed.",
+        },
+      ]),
+    );
+    const triageFindings = vi.fn().mockResolvedValue([]);
+    const provider: AiProvider = {
+      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
+      triageFindings,
+    };
+    const currentCallbacks = [
+      "http://localhost:3000/auth/callback",
+      "http://localhost:4000/auth/callback",
+      "https://assistant.example.com/auth/callback",
+    ];
+    const configurationLoader = vi.fn(
+      (findings: readonly NormalizedCheckmateFinding[]) =>
+        Promise.resolve(
+          new Map(
+            findings.map((finding, index): [string, ActionableChange[]] => [
+              finding.id,
+              [
+                {
+                  resourceType: "client",
+                  resourceId: "client_assistant0",
+                  resourceName: "Assistant0",
+                  configPath: "callbacks",
+                  currentValue: currentCallbacks,
+                  targetValue: currentCallbacks.filter((callback) =>
+                    index === 0
+                      ? !callback.includes("localhost:3000")
+                      : !callback.includes("localhost:4000"),
+                  ),
+                },
+              ],
+            ]),
+          ),
+        ),
+    );
+    const running = await startUiServer(
+      {
+        report: reportPath,
+        profile: "dev",
+        status: "failed",
+        port: 0,
+        outputDirectory: directory,
+      },
+      {
+        provider,
+        configurationLoader,
+        env: {
+          AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+          AUTH0CHECKMATE_DEV_CLIENT_ID: "client-id",
+          AUTH0CHECKMATE_DEV_CLIENT_SECRET: "client-secret",
+        },
+        now: () => new Date("2026-07-25T10:00:00.000Z"),
+      },
+    );
+
+    try {
+      const root = await fetch(running.url);
+      const cookie = root.headers.get("set-cookie")?.split(";")[0];
+      const response = await fetch(`${running.url}/api/triage`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      const state = (await response.json()) as {
+        findings: Array<{
+          key: string;
+          title: string;
+          selectionMode: string;
+          actionableChanges: Array<{
+            actionId: string;
+            currentValue: string[];
+            targetValue: string[];
+          }>;
+        }>;
+      };
+      expect(state.findings).toHaveLength(1);
+      expect(state.findings[0]).toMatchObject({
+        title: "Remove insecure callback URLs from Assistant0",
+        selectionMode: "changes",
+      });
+      expect(state.findings[0]?.actionableChanges).toHaveLength(2);
+      expect(triageFindings).not.toHaveBeenCalled();
+
+      const selectedActionId =
+        state.findings[0]!.actionableChanges[0]!.actionId;
+      const save = await fetch(`${running.url}/api/decision`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          findingKey: state.findings[0]!.key,
+          status: "approved",
+          rationale: "",
+          selectedActionIds: [selectedActionId],
+        }),
+      });
+      expect(save.status).toBe(200);
+      const stored = reviewSessionSchema.parse(
+        JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
+      );
+      expect(stored.decisions).toHaveLength(2);
+      expect(
+        stored.decisions.map((decision) => decision.decision.status),
+      ).toEqual(["approved", "accepted_risk"]);
     } finally {
       await running.close();
     }
