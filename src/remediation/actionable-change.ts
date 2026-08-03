@@ -11,7 +11,12 @@ export const configurationValueSchema = z.union([
 export type ConfigurationValue = z.infer<typeof configurationValueSchema>;
 
 export const actionableChangeSchema = z.object({
-  resourceType: z.enum(["connection", "attack_protection", "client"]),
+  resourceType: z.enum([
+    "connection",
+    "attack_protection",
+    "client",
+    "resource_server",
+  ]),
   resourceId: z.string().min(1),
   resourceName: z.string().min(1),
   configPath: z.string().min(1),

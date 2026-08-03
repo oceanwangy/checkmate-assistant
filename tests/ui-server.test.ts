@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -11,7 +11,7 @@ import type { NormalizedCheckmateFinding } from "../src/findings/types.js";
 import type { ScanMetadata } from "../src/checkmate/types.js";
 import type { ActionableChange } from "../src/remediation/actionable-change.js";
 import { buildActionCandidates } from "../src/remediation/action-candidates.js";
-import { apiPlanSchema } from "../src/remediation/api-plan.js";
+import { apiPlanSchema, type ApiPlan } from "../src/remediation/api-plan.js";
 import { createChangePackagePaths } from "../src/remediation/change-package-writer.js";
 import { reviewSessionSchema } from "../src/remediation/review-schema.js";
 import type { TerraformValidationResult } from "../src/remediation/terraform-validator.js";
@@ -126,6 +126,7 @@ describe("local review UI", () => {
     );
     const planExecutor = vi.fn((): Promise<ApiExecutionResult> =>
       Promise.resolve({
+        operation: "apply",
         status: "succeeded",
         startedAt: "2026-07-10T10:01:00.000Z",
         completedAt: "2026-07-10T10:01:01.000Z",
@@ -140,13 +141,37 @@ describe("local review UI", () => {
         ],
       }),
     );
+    const planRollbackExecutor = vi.fn((): Promise<ApiExecutionResult> =>
+      Promise.resolve({
+        operation: "rollback",
+        status: "succeeded",
+        startedAt: "2026-07-10T10:02:00.000Z",
+        completedAt: "2026-07-10T10:02:01.000Z",
+        profile: "dev",
+        calls: [
+          {
+            id: "api-call-1",
+            endpoint: "/api/v2/connections/con_database",
+            status: "rolled_back",
+            correlationId: "checkmate-rollback-test",
+          },
+        ],
+      }),
+    );
     const apiPlanValidator = vi.fn(
-      (plan: { profile: "dev" | "prod" }): Promise<ApiPlanValidationResult> =>
+      (plan: ApiPlan): Promise<ApiPlanValidationResult> =>
         Promise.resolve({
           valid: true,
           profile: plan.profile,
           validatedAt: "2026-07-10T10:00:00.000Z",
-          calls: [],
+          calls: plan.calls.map((call) => ({
+            id: call.id,
+            endpoint: call.endpoint,
+            method: call.method,
+            resourceName: call.resourceName,
+            status: "ready",
+            requestSha256: "a".repeat(64),
+          })),
         }),
     );
     const terraformValidator = vi.fn(
@@ -184,7 +209,17 @@ describe("local review UI", () => {
         now: () => new Date("2026-07-10T10:00:00.000Z"),
         configurationLoader,
         planExecutor,
+        planRollbackExecutor,
         apiPlanValidator,
+        productionCredentialAccessInspector: vi.fn(() =>
+          Promise.resolve({
+            status: "write_access_detected" as const,
+            checkedAt: "2026-07-10T10:00:00.000Z",
+            writeScopes: ["update:clients"],
+            message:
+              "Production credentials have Management API write access (update:clients). Package creation continued.",
+          }),
+        ),
         terraformValidator,
       },
     );
@@ -206,7 +241,6 @@ describe("local review UI", () => {
       expect(initialText).not.toContain("never-return-this-secret");
       const initial = JSON.parse(initialText) as {
         triaged: boolean;
-        findingStatus: string;
         reportValidatorCount: number;
         reportFindingCount: number;
         posture: {
@@ -217,13 +251,12 @@ describe("local review UI", () => {
       };
       expect(initial).toMatchObject({
         triaged: false,
-        findingStatus: "failed",
         reportValidatorCount: 2,
         reportFindingCount: 3,
         findings: [],
       });
       expect(initial.posture.current).toEqual(initial.posture.projected);
-      expect(initial.posture.current.score).toBeLessThan(100);
+      expect(initial.posture.current.score).toBe(108);
 
       const triageResponse = await fetch(`${running.url}/api/triage`, {
         method: "POST",
@@ -250,6 +283,8 @@ describe("local review UI", () => {
         findings: Array<{
           key: string;
           title: string;
+          impact: string;
+          points: number;
           analysis: { remediationConsiderations: string[] };
           actionableChanges: Array<{
             configPath: string;
@@ -262,6 +297,8 @@ describe("local review UI", () => {
       expect(triaged.findings).toHaveLength(2);
       expect(triaged.findings[0]).toMatchObject({
         title: "Set a strong password policy",
+        impact: "High priority",
+        points: 5,
         analysis: {
           remediationConsiderations: ["Set the password policy to good."],
         },
@@ -279,7 +316,7 @@ describe("local review UI", () => {
       expect(triaged.posture.projected.openControls).toContainEqual(
         expect.objectContaining({
           title: "Management API user access",
-          importance: "High impact",
+          importance: "High priority",
           recommendationAvailable: false,
         }),
       );
@@ -365,12 +402,14 @@ describe("local review UI", () => {
           posture: {
             current: { score: number };
             projected: { score: number };
+            delta: number;
           };
         };
       };
-      expect(partiallyApproved.state.posture.projected.score).toBeGreaterThan(
+      expect(partiallyApproved.state.posture.projected.score).toBe(
         partiallyApproved.state.posture.current.score,
       );
+      expect(partiallyApproved.state.posture.delta).toBe(0);
       const completed = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
       );
@@ -399,13 +438,16 @@ describe("local review UI", () => {
             directory: string;
             dev: {
               apiFile: string;
+              shellFile: string;
               terraformFile: string;
               apiPlanSha256: string;
             };
             prod: {
               apiFile: string;
+              shellFile: string;
               terraformFile: string;
               apiPlanSha256: string;
+              credentialAccess: { status: string; message: string };
             };
           };
         };
@@ -418,10 +460,20 @@ describe("local review UI", () => {
         },
       });
       expect(submitted.state.changePackage).toMatchObject({
-        dev: { apiFile: "dev/api-plan.yml", terraformFile: "dev/main.tf" },
+        dev: {
+          apiFile: "dev/api-plan.yml",
+          shellFile: "dev/apply-api-plan.sh",
+          terraformFile: "dev/main.tf",
+        },
         prod: {
           apiFile: "prod/api-plan.yml",
+          shellFile: "prod/apply-api-plan.sh",
           terraformFile: "prod/main.tf",
+          credentialAccess: {
+            status: "write_access_detected",
+            message:
+              "Production credentials have Management API write access. Package creation continued, but these credentials should be replaced with a read-only client grant.",
+          },
         },
       });
       expect(submitted.state.changePackage.dev.apiPlanSha256).toMatch(
@@ -452,8 +504,15 @@ describe("local review UI", () => {
         'data "auth0_connection"',
       );
       expect(await readFile(packagePaths.prod.terraform, "utf8")).toContain(
-        'profile        = "prod"',
+        'profile                    = "prod"',
       );
+      const devShell = await readFile(packagePaths.dev.shell, "utf8");
+      expect(devShell).toContain("#!/usr/bin/env bash");
+      expect(devShell).toContain("# Tenant: tenant.auth0.com");
+      expect(devShell).toContain(
+        "AUTH0CHECKMATE_DEV_DOMAIN must exactly match the validated tenant ${EXPECTED_DOMAIN}",
+      );
+      expect((await stat(packagePaths.dev.shell)).mode & 0o777).toBe(0o700);
 
       const apiPreview = await fetch(
         `${running.url}/api/artifact?profile=dev&artifact=api`,
@@ -474,7 +533,22 @@ describe("local review UI", () => {
         'attachment; filename="prod-main.tf"',
       );
       expect(await terraformDownload.text()).toContain(
-        'profile        = "prod"',
+        'profile                    = "prod"',
+      );
+
+      const shellDownload = await fetch(
+        `${running.url}/api/artifact?profile=dev&artifact=shell&download=1`,
+        { headers: { cookie: cookie! } },
+      );
+      expect(shellDownload.status).toBe(200);
+      expect(shellDownload.headers.get("content-type")).toContain(
+        "text/x-shellscript",
+      );
+      expect(shellDownload.headers.get("content-disposition")).toBe(
+        'attachment; filename="dev-apply-api-plan.sh"',
+      );
+      expect(await shellDownload.text()).toContain(
+        "Applied and verified all validated API calls.",
       );
 
       const unsupportedArtifact = await fetch(
@@ -521,6 +595,7 @@ describe("local review UI", () => {
         executed: boolean;
         state: {
           canExecute: boolean;
+          canRollback: boolean;
           execution: ApiExecutionResult;
         };
       };
@@ -528,11 +603,12 @@ describe("local review UI", () => {
         executed: true,
         state: {
           canExecute: false,
+          canRollback: true,
           execution: { status: "succeeded" },
         },
       });
       expect(planExecutor).toHaveBeenCalledOnce();
-      expect(apiPlanValidator).toHaveBeenCalledTimes(3);
+      expect(apiPlanValidator).toHaveBeenCalledTimes(5);
       expect(terraformValidator).toHaveBeenCalledTimes(3);
       const executionRecord = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
@@ -546,6 +622,41 @@ describe("local review UI", () => {
       expect(executionRecord.execution?.planSha256).toBe(
         submitted.state.changePackage.dev.apiPlanSha256,
       );
+
+      const rollbackResponse = await fetch(`${running.url}/api/rollback`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      expect(rollbackResponse.status).toBe(200);
+      const rolledBack = (await rollbackResponse.json()) as {
+        rolledBack: boolean;
+        state: {
+          canRollback: boolean;
+          execution: ApiExecutionResult;
+        };
+      };
+      expect(rolledBack).toMatchObject({
+        rolledBack: true,
+        state: {
+          canRollback: false,
+          execution: { operation: "rollback", status: "succeeded" },
+        },
+      });
+      expect(planRollbackExecutor).toHaveBeenCalledOnce();
+      const rollbackRecord = reviewSessionSchema.parse(
+        JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
+      );
+      expect(rollbackRecord.execution).toMatchObject({
+        operation: "rollback",
+        status: "succeeded",
+        calls: [{ status: "rolled_back" }],
+      });
+      expect(rollbackRecord.executionHistory).toHaveLength(2);
     } finally {
       await running.close();
     }
@@ -673,6 +784,7 @@ describe("local review UI", () => {
           key: string;
           title: string;
           selectionMode: string;
+          defaultSelected: boolean;
           actionableChanges: Array<{ actionId: string; resourceName: string }>;
         }>;
       };
@@ -687,6 +799,7 @@ describe("local review UI", () => {
         key: "applications-remove-implicit",
         title: "Remove the Implicit grant type from",
         selectionMode: "applications",
+        defaultSelected: false,
         actionableChanges: [
           { resourceName: "App One" },
           { resourceName: "App Two" },
@@ -696,6 +809,7 @@ describe("local review UI", () => {
         key: "applications-disable-cross-origin",
         title: "Disable cross-origin authentication for",
         selectionMode: "applications",
+        defaultSelected: true,
         actionableChanges: [{ resourceName: "Default App" }],
       });
       expect(triageFindings).not.toHaveBeenCalled();
@@ -732,6 +846,310 @@ describe("local review UI", () => {
           (decision) => decision.decision.adminNote === undefined,
         ),
       ).toBe(true);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("keeps system Management API settings out of dual-format recommendations", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-ui-"));
+    const reportPath = path.join(directory, "management-api-access.json");
+    await writeFile(
+      reportPath,
+      JSON.stringify([
+        {
+          name: "checkManagementAPIUserAccess",
+          title: "Management API user access",
+          status: "red",
+          severity: "High",
+          details: [
+            {
+              name: "Auth0 Management API",
+              field: "management_api_user_access_allowed",
+              status: "red",
+              message: "Management API user access is allowed for all apps.",
+            },
+          ],
+          detailsLength: 1,
+        },
+      ]),
+    );
+    const triageFindings = vi.fn().mockResolvedValue([]);
+    const provider: AiProvider = {
+      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
+      triageFindings,
+    };
+    const configurationLoader = vi.fn(
+      (findings: readonly NormalizedCheckmateFinding[]) =>
+        Promise.resolve(
+          new Map([
+            [
+              findings[0]!.id,
+              [
+                {
+                  resourceType: "resource_server" as const,
+                  resourceId: "auth0-management-api",
+                  resourceName: "Auth0 Management API",
+                  configPath: "subject_type_authorization.user.policy",
+                  currentValue: "allow_all",
+                  targetValue: "require_client_grant",
+                },
+                {
+                  resourceType: "resource_server" as const,
+                  resourceId: "auth0-management-api",
+                  resourceName: "Auth0 Management API",
+                  configPath: "subject_type_authorization.user.policy",
+                  currentValue: "allow_all",
+                  targetValue: "deny_all",
+                },
+              ],
+            ],
+          ]),
+        ),
+    );
+    const running = await startUiServer(
+      {
+        report: reportPath,
+        profile: "dev",
+        status: "failed",
+        port: 0,
+        outputDirectory: directory,
+      },
+      {
+        provider,
+        configurationLoader,
+        env: {
+          AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+          AUTH0CHECKMATE_DEV_CLIENT_ID: "client-id",
+          AUTH0CHECKMATE_DEV_CLIENT_SECRET: "client-secret",
+        },
+        now: () => new Date("2026-08-03T10:00:00.000Z"),
+      },
+    );
+
+    try {
+      const root = await fetch(running.url);
+      const cookie = root.headers.get("set-cookie")?.split(";")[0];
+      const triage = await fetch(`${running.url}/api/triage`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(triage.status).toBe(200);
+      const state = (await triage.json()) as {
+        findings: Array<{
+          key: string;
+        }>;
+        submissionReady: boolean;
+        posture: {
+          projected: {
+            openControls: Array<{
+              title: string;
+              recommendationAvailable: boolean;
+            }>;
+          };
+        };
+      };
+      expect(state.findings).toEqual([]);
+      expect(state.submissionReady).toBe(false);
+      expect(state.posture.projected.openControls).toEqual([
+        expect.objectContaining({
+          title: "Management API user access",
+          recommendationAvailable: false,
+        }),
+      ]);
+      expect(triageFindings).not.toHaveBeenCalled();
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("groups deterministic password changes with selectable connections", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-ui-"));
+    const reportPath = path.join(directory, "password-history.json");
+    await writeFile(
+      reportPath,
+      JSON.stringify([
+        {
+          name: "checkPasswordHistory",
+          title: "Databases - Password History",
+          status: "green",
+          severity: "Low",
+          details: [
+            {
+              name: "my-own-db",
+              field: "password_history_disabled",
+              status: "red",
+              message: "Password history is disabled.",
+            },
+            {
+              name: "Username-Password-Authentication",
+              field: "password_history_disabled",
+              status: "red",
+              message: "Password history is disabled.",
+            },
+          ],
+          detailsLength: 2,
+        },
+        {
+          name: "checkPasswordNoPersonalInfo",
+          title: "Databases - Personal Information in Passwords",
+          status: "yellow",
+          severity: "Moderate",
+          details: [
+            {
+              name: "my-own-db",
+              field: "password_no_personal_info_disabled",
+              status: "red",
+              message: "Personal information in passwords is allowed.",
+            },
+            {
+              name: "Username-Password-Authentication",
+              field: "password_no_personal_info_disabled",
+              status: "red",
+              message: "Personal information in passwords is allowed.",
+            },
+          ],
+          detailsLength: 2,
+        },
+        {
+          name: "checkAuthenticationMethods",
+          title: "Databases - Authentication Methods",
+          status: "yellow",
+          severity: "Moderate",
+          details: [
+            {
+              name: "my-own-db",
+              field: "only_password_method",
+              status: "red",
+              message: "Passkeys are not enabled.",
+            },
+            {
+              name: "Username-Password-Authentication",
+              field: "only_password_method",
+              status: "red",
+              message: "Passkeys are not enabled.",
+            },
+          ],
+          detailsLength: 2,
+        },
+      ]),
+    );
+    const triageFindings = vi.fn().mockResolvedValue([]);
+    const provider: AiProvider = {
+      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
+      triageFindings,
+    };
+    const configurationLoader = vi.fn(
+      (findings: readonly NormalizedCheckmateFinding[]) =>
+        Promise.resolve(
+          new Map(
+            findings.map((finding): [string, ActionableChange[]] => [
+              finding.id,
+              [
+                {
+                  resourceType: "connection",
+                  resourceId: `con_${finding.validatorId}_${finding.affectedResource?.name === "my-own-db" ? "custom" : "default"}`,
+                  resourceName: finding.affectedResource?.name ?? "Unknown",
+                  configPath:
+                    finding.validatorId === "checkPasswordHistory"
+                      ? "options.password_history.enable"
+                      : finding.validatorId === "checkPasswordNoPersonalInfo"
+                        ? "options.password_no_personal_info.enable"
+                        : "options.authentication_methods.passkey.enabled",
+                  currentValue: false,
+                  targetValue: true,
+                },
+              ],
+            ]),
+          ),
+        ),
+    );
+    const running = await startUiServer(
+      {
+        report: reportPath,
+        profile: "dev",
+        status: "failed",
+        port: 0,
+        outputDirectory: directory,
+      },
+      {
+        provider,
+        configurationLoader,
+        env: {
+          AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+          AUTH0CHECKMATE_DEV_CLIENT_ID: "client-id",
+          AUTH0CHECKMATE_DEV_CLIENT_SECRET: "client-secret",
+        },
+        now: () => new Date("2026-08-03T10:00:00.000Z"),
+      },
+    );
+
+    try {
+      const root = await fetch(running.url);
+      const cookie = root.headers.get("set-cookie")?.split(";")[0];
+      const response = await fetch(`${running.url}/api/triage`, {
+        method: "POST",
+        headers: {
+          cookie: cookie!,
+          origin: running.url,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      const state = (await response.json()) as {
+        findings: Array<{
+          key: string;
+          title: string;
+          selectionMode: string;
+          defaultSelected: boolean;
+          actionableChanges: Array<{ actionId: string; resourceName: string }>;
+        }>;
+      };
+      expect(state.findings).toHaveLength(3);
+      const passwordHistory = state.findings.find(
+        (finding) => finding.key === "connections-enable-password-history",
+      );
+      const personalInformation = state.findings.find(
+        (finding) => finding.key === "connections-block-personal-information",
+      );
+      const passkeys = state.findings.find(
+        (finding) => finding.key === "connections-enable-passkeys",
+      );
+      expect(passwordHistory).toMatchObject({
+        key: "connections-enable-password-history",
+        title: "Enable password history",
+        selectionMode: "connections",
+        actionableChanges: [
+          { resourceName: "my-own-db" },
+          { resourceName: "Username-Password-Authentication" },
+        ],
+      });
+      expect(personalInformation).toMatchObject({
+        key: "connections-block-personal-information",
+        title: "Block personal information",
+        selectionMode: "connections",
+        actionableChanges: [
+          { resourceName: "my-own-db" },
+          { resourceName: "Username-Password-Authentication" },
+        ],
+      });
+      expect(passkeys).toMatchObject({
+        key: "connections-enable-passkeys",
+        title: "Enable passkeys",
+        selectionMode: "connections",
+        defaultSelected: false,
+        actionableChanges: [
+          { resourceName: "my-own-db" },
+          { resourceName: "Username-Password-Authentication" },
+        ],
+      });
+      expect(triageFindings).not.toHaveBeenCalled();
     } finally {
       await running.close();
     }
@@ -837,6 +1255,7 @@ describe("local review UI", () => {
           key: string;
           title: string;
           selectionMode: string;
+          defaultSelected: boolean;
           actionableChanges: Array<{
             actionId: string;
             currentValue: string[];
@@ -848,6 +1267,7 @@ describe("local review UI", () => {
       expect(state.findings[0]).toMatchObject({
         title: "Remove insecure callback URLs from Assistant0",
         selectionMode: "changes",
+        defaultSelected: false,
       });
       expect(state.findings[0]?.actionableChanges).toHaveLength(2);
       expect(triageFindings).not.toHaveBeenCalled();

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import path from "node:path";
 import type { ActionableChange } from "./actionable-change.js";
 import type { ReviewSession } from "./review-schema.js";
 
@@ -6,18 +7,35 @@ const apiCallSchema = z.object({
   id: z.string().min(1),
   method: z.literal("PATCH"),
   endpoint: z.string().startsWith("/api/v2/"),
-  resourceType: z.enum(["connection", "attack_protection", "client"]),
+  resourceType: z.enum([
+    "connection",
+    "attack_protection",
+    "client",
+    "resource_server",
+  ]),
   resourceId: z.string().min(1),
   resourceName: z.string().min(1),
   bodyStrategy: z.enum([
     "merge_live_connection_options",
     "merge_live_nested_objects",
+    "planned_partial",
   ]),
   actionIds: z.array(z.string().min(1)).min(1),
   preconditions: z.array(
     z.object({ path: z.string().min(1), expectedValue: z.unknown() }),
   ),
   body: z.record(z.unknown()),
+  validatedRequestSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  curl: z
+    .object({
+      shell: z.literal("bash"),
+      requiredEnvironmentVariables: z.array(z.string().min(1)).min(3),
+      script: z.string().min(1),
+    })
+    .optional(),
 });
 
 export const apiPlanSchema = z.object({
@@ -25,6 +43,11 @@ export const apiPlanSchema = z.object({
   generatedAt: z.string().datetime(),
   sourceReport: z.string().min(1),
   profile: z.enum(["dev", "prod"]),
+  tenantDomain: z
+    .string()
+    .regex(/^[a-zA-Z0-9.-]+\.auth0\.com$/)
+    .optional(),
+  validatedAt: z.string().datetime().optional(),
   calls: z.array(apiCallSchema),
   unchangedActionIds: z.array(z.string().min(1)),
   alreadyCompliantActionIds: z.array(z.string().min(1)),
@@ -34,6 +57,9 @@ export type ApiPlan = z.infer<typeof apiPlanSchema>;
 export type ApiPlanCall = z.infer<typeof apiCallSchema>;
 
 function endpointFor(change: ActionableChange): string {
+  if (change.resourceType === "resource_server") {
+    return `/api/v2/resource-servers/${encodeURIComponent(change.resourceId)}`;
+  }
   if (change.resourceType === "client") {
     return `/api/v2/clients/${encodeURIComponent(change.resourceId)}`;
   }
@@ -143,7 +169,9 @@ function callsForActions(
         bodyStrategy:
           change.resourceType === "connection"
             ? "merge_live_connection_options"
-            : "merge_live_nested_objects",
+            : change.resourceType === "resource_server"
+              ? "planned_partial"
+              : "merge_live_nested_objects",
         actionIds: [],
         preconditions: [],
         body: {},
@@ -174,7 +202,7 @@ export function buildApiPlanFromActions(
   return apiPlanSchema.parse({
     schemaVersion: 1,
     generatedAt,
-    sourceReport,
+    sourceReport: path.basename(sourceReport),
     profile,
     calls: callsForActions(actions),
     unchangedActionIds: [],
@@ -205,7 +233,7 @@ export function buildApiPlan(
   return apiPlanSchema.parse({
     schemaVersion: 1,
     generatedAt,
-    sourceReport: session.report.sourceReport,
+    sourceReport: path.basename(session.report.sourceReport),
     profile,
     calls: callsForActions(approvedActions),
     unchangedActionIds,

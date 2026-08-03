@@ -9,6 +9,7 @@ import {
   writeApiPlan,
 } from "../src/remediation/api-plan-writer.js";
 import type { ReviewSession } from "../src/remediation/review-schema.js";
+import { finalizeValidatedApiPlan } from "../src/remediation/validated-api-plan.js";
 
 const analysis = {
   whatItMeans: ["The current setting needs improvement."],
@@ -143,6 +144,65 @@ describe("Auth0 API plan", () => {
     expect(artifact.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("stamps every PATCH call with its live validation digest", () => {
+    const draft = buildApiPlan(session(), "dev", "2026-07-10T10:06:00.000Z");
+    const finalized = finalizeValidatedApiPlan(
+      draft,
+      {
+        valid: true,
+        profile: "dev",
+        validatedAt: "2026-07-10T10:07:00.000Z",
+        calls: [
+          {
+            id: "api-call-1",
+            endpoint: "/api/v2/connections/con_database",
+            method: "PATCH",
+            resourceName: "Username-Password-Authentication",
+            status: "ready",
+            requestSha256: "a".repeat(64),
+          },
+        ],
+      },
+      "tenant.auth0.com",
+    );
+
+    expect(finalized).toMatchObject({
+      tenantDomain: "tenant.auth0.com",
+      validatedAt: "2026-07-10T10:07:00.000Z",
+      calls: [
+        {
+          validatedRequestSha256: "a".repeat(64),
+          curl: {
+            shell: "bash",
+            requiredEnvironmentVariables: [
+              "AUTH0CHECKMATE_DEV_DOMAIN",
+              "AUTH0CHECKMATE_DEV_CLIENT_ID",
+              "AUTH0CHECKMATE_DEV_CLIENT_SECRET",
+            ],
+          },
+        },
+      ],
+    });
+    expect(finalized.calls[0]?.curl?.script).toContain("--request PATCH");
+  });
+
+  it("refuses to finalize an API plan with incomplete validation coverage", () => {
+    const draft = buildApiPlan(session(), "dev", "2026-07-10T10:06:00.000Z");
+
+    expect(() =>
+      finalizeValidatedApiPlan(
+        draft,
+        {
+          valid: true,
+          profile: "dev",
+          validatedAt: "2026-07-10T10:07:00.000Z",
+          calls: [],
+        },
+        "tenant.auth0.com",
+      ),
+    ).toThrow("did not cover Username-Password-Authentication");
+  });
+
   it("creates a partial client PATCH for application settings", () => {
     const review = session();
     review.decisions = [
@@ -179,6 +239,50 @@ describe("Auth0 API plan", () => {
         resourceType: "client",
         bodyStrategy: "merge_live_nested_objects",
         body: { grant_types: ["authorization_code", "refresh_token"] },
+      }),
+    ]);
+  });
+
+  it("creates a resource-server PATCH for the selected user-access policy", () => {
+    const review = session();
+    review.decisions = [
+      {
+        checkmateFindingId: "management-api-user-access",
+        checkmateTitle: "Management API user access",
+        checkmateStatus: "failed",
+        analysis,
+        answers: [],
+        actionableChangeId: "action-per-app",
+        actionableChanges: [
+          {
+            resourceType: "resource_server",
+            resourceId: "auth0-management-api",
+            resourceName: "Auth0 Management API",
+            configPath: "subject_type_authorization.user.policy",
+            currentValue: "allow_all",
+            targetValue: "require_client_grant",
+          },
+        ],
+        decision: {
+          status: "approved",
+          rationale: "Require explicit application grants.",
+          decidedAt: "2026-08-03T10:05:00.000Z",
+        },
+      },
+    ];
+
+    const plan = buildApiPlan(review, "dev", "2026-08-03T10:06:00.000Z");
+
+    expect(plan.calls).toEqual([
+      expect.objectContaining({
+        endpoint: "/api/v2/resource-servers/auth0-management-api",
+        resourceType: "resource_server",
+        bodyStrategy: "planned_partial",
+        body: {
+          subject_type_authorization: {
+            user: { policy: "require_client_grant" },
+          },
+        },
       }),
     ]);
   });

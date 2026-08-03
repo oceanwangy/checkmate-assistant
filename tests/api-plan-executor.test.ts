@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  apiRequestSha256,
   executeApiPlan,
+  rollbackApiPlan,
   validateApiPlan,
 } from "../src/auth0/api-plan-executor.js";
 import type { Fetcher } from "../src/auth0/fetcher.js";
@@ -23,6 +25,7 @@ function plan(): ApiPlan {
     generatedAt: "2026-07-10T10:00:00.000Z",
     sourceReport: "/reports/report.json",
     profile: "dev",
+    tenantDomain: "tenant.auth0.com",
     unchangedActionIds: [],
     alreadyCompliantActionIds: [],
     calls: [
@@ -59,6 +62,7 @@ function attackPlan(): ApiPlan {
     generatedAt: "2026-07-10T10:00:00.000Z",
     sourceReport: "/reports/report.json",
     profile: "dev",
+    tenantDomain: "tenant.auth0.com",
     unchangedActionIds: [],
     alreadyCompliantActionIds: [],
     calls: [
@@ -91,6 +95,7 @@ function clientPlan(): ApiPlan {
     generatedAt: "2026-07-10T10:00:00.000Z",
     sourceReport: "/reports/report.json",
     profile: "dev",
+    tenantDomain: "tenant.auth0.com",
     unchangedActionIds: [],
     alreadyCompliantActionIds: [],
     calls: [
@@ -115,6 +120,41 @@ function clientPlan(): ApiPlan {
           jwt_configuration: { alg: "RS256" },
           cross_origin_authentication: false,
           grant_types: ["authorization_code", "refresh_token"],
+        },
+      },
+    ],
+  };
+}
+
+function resourceServerPlan(): ApiPlan {
+  return {
+    schemaVersion: 1,
+    generatedAt: "2026-08-03T10:00:00.000Z",
+    sourceReport: "/reports/report.json",
+    profile: "dev",
+    tenantDomain: "tenant.auth0.com",
+    unchangedActionIds: [],
+    alreadyCompliantActionIds: [],
+    calls: [
+      {
+        id: "api-call-1",
+        method: "PATCH",
+        endpoint: "/api/v2/resource-servers/auth0-management-api",
+        resourceType: "resource_server",
+        resourceId: "auth0-management-api",
+        resourceName: "Auth0 Management API",
+        bodyStrategy: "planned_partial",
+        actionIds: ["action-per-app"],
+        preconditions: [
+          {
+            path: "subject_type_authorization.user.policy",
+            expectedValue: "allow_all",
+          },
+        ],
+        body: {
+          subject_type_authorization: {
+            user: { policy: "require_client_grant" },
+          },
         },
       },
     ],
@@ -179,6 +219,66 @@ describe("Auth0 API plan executor", () => {
       "missing required scopes",
     );
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a tenant-bound plan before authentication when domains differ", async () => {
+    const fetcher = vi.fn<Fetcher>();
+
+    await expect(
+      validateApiPlan(
+        { ...plan(), tenantDomain: "different.auth0.com" },
+        config,
+        { fetcher },
+      ),
+    ).rejects.toThrow(
+      "bound to different.auth0.com and cannot be used with tenant.auth0.com",
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects unbound plans before dev execution", async () => {
+    const fetcher = vi.fn<Fetcher>();
+
+    await expect(
+      executeApiPlan({ ...plan(), tenantDomain: undefined }, config, {
+        fetcher,
+      }),
+    ).rejects.toThrow("is not bound to an Auth0 tenant");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("validates production-style plans with read-only scopes", async () => {
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: "management-token",
+            scope: "read:connections read:connections_options",
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)));
+
+    const result = await validateApiPlan(
+      { ...plan(), profile: "prod" },
+      { ...config, profile: "prod" },
+      { fetcher, authorizationMode: "read_only" },
+    );
+
+    expect(result.valid).toBe(true);
+    const tokenBody = JSON.parse(
+      fetcher.mock.calls[0]?.[1]?.body as string,
+    ) as { scope: string };
+    expect(tokenBody.scope).toContain("read:connections");
+    expect(tokenBody.scope).not.toContain("update:");
   });
 
   it("merges planned connection changes into live options and verifies them", async () => {
@@ -371,6 +471,49 @@ describe("Auth0 API plan executor", () => {
     ).toBe(false);
   });
 
+  it("stops when a finalized YAML request digest no longer matches live state", async () => {
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+        requires_username: true,
+      },
+    };
+    const finalizedPlan: ApiPlan = {
+      ...plan(),
+      validatedAt: "2026-07-10T10:00:30.000Z",
+      calls: [
+        {
+          ...plan().calls[0]!,
+          validatedRequestSha256: apiRequestSha256(
+            "PATCH",
+            "/api/v2/connections/con_database",
+            {
+              options: {
+                passwordPolicy: "good",
+                password_history: { enable: true },
+                requires_username: false,
+              },
+            },
+          ),
+        },
+      ],
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)));
+
+    const result = await executeApiPlan(finalizedPlan, config, { fetcher });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("changed after package creation");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("preserves unselected nested attack-protection settings", async () => {
     const before = {
       enabled: true,
@@ -456,6 +599,231 @@ describe("Auth0 API plan executor", () => {
       },
       cross_origin_authentication: false,
       grant_types: ["authorization_code", "refresh_token"],
+    });
+  });
+
+  it("stops when Auth0 changes an unselected setting after PATCH", async () => {
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+        requires_username: false,
+      },
+    };
+    const after = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "good",
+        password_history: { enable: true },
+        requires_username: true,
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)));
+
+    const result = await executeApiPlan(plan(), config, { fetcher });
+
+    expect(result).toMatchObject({
+      operation: "apply",
+      status: "failed",
+      calls: [{ status: "verification_failed" }],
+    });
+    expect(result.error).toContain("unselected setting");
+    expect(result.error).toContain("options.requires_username");
+  });
+
+  it("resumes after verifying calls that were already applied", async () => {
+    const original = plan().calls[0]!;
+    const second = {
+      ...structuredClone(original),
+      id: "api-call-2",
+      endpoint: "/api/v2/connections/con_second",
+      resourceId: "con_second",
+      resourceName: "Second Database",
+    };
+    const resumablePlan: ApiPlan = {
+      ...plan(),
+      calls: [original, second],
+    };
+    const target = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "good",
+        password_history: { enable: true },
+      },
+    };
+    const beforeSecond = {
+      id: "con_second",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const afterSecond = {
+      id: "con_second",
+      options: {
+        passwordPolicy: "good",
+        password_history: { enable: true },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(target)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(beforeSecond)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(afterSecond)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(afterSecond)));
+
+    const result = await executeApiPlan(resumablePlan, config, {
+      fetcher,
+      previousExecution: {
+        operation: "apply",
+        status: "failed",
+        startedAt: "2026-07-10T10:00:00.000Z",
+        completedAt: "2026-07-10T10:00:01.000Z",
+        profile: "dev",
+        calls: [
+          {
+            id: "api-call-1",
+            endpoint: original.endpoint,
+            status: "applied",
+            correlationId: "checkmate-first",
+          },
+          {
+            id: "api-call-2",
+            endpoint: second.endpoint,
+            status: "failed",
+            correlationId: "checkmate-second",
+            error: "temporary failure",
+          },
+        ],
+        error: "temporary failure",
+      },
+    });
+
+    expect(result).toMatchObject({
+      operation: "apply",
+      status: "succeeded",
+      calls: [
+        { id: "api-call-1", status: "resumed_verified" },
+        { id: "api-call-2", status: "applied" },
+      ],
+    });
+    expect(
+      fetcher.mock.calls.filter(([, request]) => request?.method === "PATCH"),
+    ).toHaveLength(1);
+  });
+
+  it("rolls back applied calls to their reviewed original values", async () => {
+    const target = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "good",
+        password_history: { enable: true },
+        requires_username: false,
+      },
+    };
+    const original = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+        requires_username: false,
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(target)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(original)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(original)));
+
+    const result = await rollbackApiPlan(
+      plan(),
+      config,
+      {
+        operation: "apply",
+        status: "failed",
+        startedAt: "2026-07-10T10:00:00.000Z",
+        completedAt: "2026-07-10T10:00:01.000Z",
+        profile: "dev",
+        calls: [
+          {
+            id: "api-call-1",
+            endpoint: plan().calls[0]!.endpoint,
+            status: "applied",
+            correlationId: "checkmate-applied",
+          },
+        ],
+        error: "a later call failed",
+      },
+      { fetcher },
+    );
+
+    expect(result).toMatchObject({
+      operation: "rollback",
+      status: "succeeded",
+      calls: [{ status: "rolled_back" }],
+    });
+    expect(JSON.parse(fetcher.mock.calls[2]?.[1]?.body as string)).toEqual({
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+        requires_username: false,
+      },
+    });
+  });
+
+  it("omits the system-managed client policy when updating Management API user access", async () => {
+    const before = {
+      id: "auth0-management-api",
+      name: "Auth0 Management API",
+      subject_type_authorization: {
+        user: { policy: "allow_all" },
+        client: { policy: "require_client_grant" },
+      },
+    };
+    const after = {
+      ...before,
+      subject_type_authorization: {
+        ...before.subject_type_authorization,
+        user: { policy: "require_client_grant" },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)));
+
+    const result = await executeApiPlan(resourceServerPlan(), config, {
+      fetcher,
+    });
+
+    expect(result.status).toBe("succeeded");
+    const tokenBody = JSON.parse(
+      fetcher.mock.calls[0]?.[1]?.body as string,
+    ) as { scope: string };
+    expect(tokenBody.scope).toContain("read:resource_servers");
+    expect(tokenBody.scope).toContain("update:resource_servers");
+    expect(JSON.parse(fetcher.mock.calls[2]?.[1]?.body as string)).toEqual({
+      subject_type_authorization: {
+        user: { policy: "require_client_grant" },
+      },
     });
   });
 

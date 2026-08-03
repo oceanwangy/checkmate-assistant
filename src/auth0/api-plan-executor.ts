@@ -19,12 +19,21 @@ const recordSchema = z.record(z.unknown());
 export interface ApiCallExecution {
   id: string;
   endpoint: string;
-  status: "applied" | "already_applied" | "failed";
+  status:
+    | "applied"
+    | "already_applied"
+    | "resumed_verified"
+    | "verification_failed"
+    | "failed"
+    | "rolled_back"
+    | "rollback_already_applied"
+    | "rollback_failed";
   correlationId: string;
   error?: string;
 }
 
 export interface ApiExecutionResult {
+  operation: "apply" | "rollback";
   status: "succeeded" | "failed";
   startedAt: string;
   completedAt: string;
@@ -38,6 +47,8 @@ export interface ApiPlanExecutorOptions {
   now?: () => Date;
   includeRequestBodies?: boolean;
   approvedRequestDigests?: Readonly<Record<string, string>>;
+  authorizationMode?: "read_only" | "read_write";
+  previousExecution?: ApiExecutionResult;
 }
 
 export interface ApiPlanValidationResult {
@@ -65,6 +76,28 @@ function tenantBaseUrl(domain: string): string {
     );
   }
   return `https://${domain}`;
+}
+
+function assertPlanTenant(
+  plan: ApiPlan,
+  config: CheckmateConfig,
+  requireBinding: boolean,
+): void {
+  if (!plan.tenantDomain) {
+    if (requireBinding) {
+      throw new AppError(
+        "AUTH0_WRITE_FAILED",
+        `The ${plan.profile} API plan is not bound to an Auth0 tenant. Create a new change package.`,
+      );
+    }
+    return;
+  }
+  if (plan.tenantDomain !== config.domain) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `The ${plan.profile} API plan is bound to ${plan.tenantDomain} and cannot be used with ${config.domain}.`,
+    );
+  }
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -172,7 +205,7 @@ function canonicalJson(value: unknown): string {
   }
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`)
       .join(",")}}`;
   }
@@ -293,6 +326,14 @@ function requestBody(
   call: ApiPlanCall,
   live: Record<string, unknown>,
 ): Record<string, unknown> {
+  if (
+    call.resourceType === "resource_server" ||
+    call.bodyStrategy === "planned_partial"
+  ) {
+    const body = cloneRecord(call.body);
+    assertJsonPayload(body);
+    return body;
+  }
   if (call.bodyStrategy === "merge_live_nested_objects") {
     const body: Record<string, unknown> = {};
     for (const [key, planned] of Object.entries(call.body)) {
@@ -331,7 +372,10 @@ function requestBody(
   return body;
 }
 
-function scopesFor(plan: ApiPlan): string[] {
+function scopesFor(
+  plan: ApiPlan,
+  mode: "read_only" | "read_write" = "read_write",
+): string[] {
   const client = plan.calls.some((call) => call.resourceType === "client");
   const connection = plan.calls.some(
     (call) => call.resourceType === "connection",
@@ -339,18 +383,149 @@ function scopesFor(plan: ApiPlan): string[] {
   const attack = plan.calls.some(
     (call) => call.resourceType === "attack_protection",
   );
+  const resourceServer = plan.calls.some(
+    (call) => call.resourceType === "resource_server",
+  );
   return [
-    ...(client ? ["read:clients", "update:clients"] : []),
+    ...(client
+      ? ["read:clients", ...(mode === "read_write" ? ["update:clients"] : [])]
+      : []),
     ...(connection
       ? [
           "read:connections",
           "read:connections_options",
-          "update:connections",
-          "update:connections_options",
+          ...(mode === "read_write"
+            ? ["update:connections", "update:connections_options"]
+            : []),
         ]
       : []),
-    ...(attack ? ["read:attack_protection", "update:attack_protection"] : []),
+    ...(attack
+      ? [
+          "read:attack_protection",
+          ...(mode === "read_write" ? ["update:attack_protection"] : []),
+        ]
+      : []),
+    ...(resourceServer
+      ? [
+          "read:resource_servers",
+          ...(mode === "read_write" ? ["update:resource_servers"] : []),
+        ]
+      : []),
   ];
+}
+
+function changedPaths(call: ApiPlanCall): string[] {
+  return call.preconditions.map((precondition) => precondition.path);
+}
+
+function preservationDifference(
+  before: unknown,
+  after: unknown,
+  selectedPaths: readonly string[],
+  currentPath = "",
+): string | undefined {
+  if (
+    (before === null || before === undefined) &&
+    (after === null || after === undefined)
+  ) {
+    return undefined;
+  }
+  if (currentPath && selectedPaths.includes(currentPath)) return undefined;
+  if (before !== null && typeof before === "object" && !Array.isArray(before)) {
+    if (after === null || typeof after !== "object" || Array.isArray(after)) {
+      return currentPath || "resource";
+    }
+    for (const [key, value] of Object.entries(before)) {
+      safeSegments(key);
+      const path = currentPath ? `${currentPath}.${key}` : key;
+      if (selectedPaths.includes(path)) continue;
+      const nestedSelection = selectedPaths.some((item) =>
+        item.startsWith(`${path}.`),
+      );
+      const afterValue = (after as Record<string, unknown>)[key];
+      if (nestedSelection) {
+        const difference = preservationDifference(
+          value,
+          afterValue,
+          selectedPaths,
+          path,
+        );
+        if (difference) return difference;
+      } else if (
+        !(
+          (value === null || value === undefined) &&
+          (afterValue === null || afterValue === undefined)
+        ) &&
+        !sameValue(value, afterValue)
+      ) {
+        return path;
+      }
+    }
+    return undefined;
+  }
+  return sameValue(before, after) ? undefined : currentPath || "resource";
+}
+
+function verifyAppliedState(
+  call: ApiPlanCall,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): void {
+  if (classifyLiveState(call, after) !== "target") {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `Auth0 did not retain the planned settings for ${call.resourceName}.`,
+    );
+  }
+  const difference = preservationDifference(before, after, changedPaths(call));
+  if (difference) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      `Auth0 changed an unselected setting for ${call.resourceName} (${difference}). Execution stopped for review.`,
+    );
+  }
+}
+
+function setValueAt(
+  target: Record<string, unknown>,
+  dottedPath: string,
+  value: unknown,
+): void {
+  const segments = safeSegments(dottedPath);
+  let current = target;
+  for (const segment of segments.slice(0, -1)) {
+    const existing = current[segment];
+    if (
+      existing !== null &&
+      typeof existing === "object" &&
+      !Array.isArray(existing)
+    ) {
+      current = existing as Record<string, unknown>;
+    } else {
+      const nested: Record<string, unknown> = {};
+      current[segment] = nested;
+      current = nested;
+    }
+  }
+  current[segments.at(-1)!] = structuredClone(value);
+}
+
+function inverseCall(call: ApiPlanCall): ApiPlanCall {
+  const body: Record<string, unknown> = {};
+  const preconditions = call.preconditions.map((precondition) => {
+    setValueAt(body, precondition.path, precondition.expectedValue);
+    return {
+      path: precondition.path,
+      expectedValue: targetValue(call, precondition.path),
+    };
+  });
+  return {
+    ...call,
+    body,
+    preconditions,
+    validatedRequestSha256: undefined,
+    curl: undefined,
+  };
 }
 
 async function managementAuthorization(
@@ -433,11 +608,12 @@ export async function validateApiPlan(
       `The ${plan.profile} API plan cannot be validated against the ${config.profile} profile.`,
     );
   }
+  assertPlanTenant(plan, config, false);
   const fetcher = options.fetcher ?? fetch;
   const now = options.now ?? (() => new Date());
   const validatedAt = now().toISOString();
   const baseUrl = tenantBaseUrl(config.domain);
-  const scopes = scopesFor(plan);
+  const scopes = scopesFor(plan, options.authorizationMode ?? "read_write");
   if (scopes.length === 0) {
     return {
       valid: true,
@@ -463,20 +639,26 @@ export async function validateApiPlan(
         authorization,
       );
       const status = classifyLiveState(call, live);
-      const body =
-        status === "safe_to_apply" ? requestBody(call, live) : undefined;
+      const body = requestBody(call, live);
+      const requestSha256 = apiRequestSha256(call.method, call.endpoint, body);
+      if (
+        requestSha256 &&
+        call.validatedRequestSha256 &&
+        call.validatedRequestSha256 !== requestSha256
+      ) {
+        throw new AppError(
+          "AUTH0_WRITE_FAILED",
+          `The validated API request for ${call.resourceName} changed after package creation. Create a new change package.`,
+        );
+      }
       calls.push({
         id: call.id,
         endpoint: call.endpoint,
         method: call.method,
         resourceName: call.resourceName,
         status: status === "target" ? "already_applied" : "ready",
-        ...(body
-          ? {
-              ...(options.includeRequestBodies ? { requestBody: body } : {}),
-              requestSha256: apiRequestSha256(call.method, call.endpoint, body),
-            }
-          : {}),
+        ...(options.includeRequestBodies ? { requestBody: body } : {}),
+        requestSha256,
       });
     } catch (error) {
       const message = toErrorMessage(error);
@@ -517,13 +699,15 @@ export async function executeApiPlan(
       "API plan execution is restricted to the dev profile.",
     );
   }
+  assertPlanTenant(plan, config, true);
   const fetcher = options.fetcher ?? fetch;
   const now = options.now ?? (() => new Date());
   const startedAt = now().toISOString();
   const baseUrl = tenantBaseUrl(config.domain);
-  const scopes = scopesFor(plan);
+  const scopes = scopesFor(plan, "read_write");
   if (scopes.length === 0) {
     return {
+      operation: "apply",
       status: "succeeded",
       startedAt,
       completedAt: now().toISOString(),
@@ -540,9 +724,15 @@ export async function executeApiPlan(
     "execution",
   );
   const calls: ApiCallExecution[] = [];
+  const previousCalls = new Map(
+    options.previousExecution?.operation === "apply"
+      ? options.previousExecution.calls.map((call) => [call.id, call])
+      : [],
+  );
 
   for (const call of plan.calls) {
     const correlationId = `checkmate-${randomUUID()}`.slice(0, 64);
+    let patchAccepted = false;
     try {
       const live = await readLiveResource(
         fetcher,
@@ -550,6 +740,40 @@ export async function executeApiPlan(
         call,
         authorization,
       );
+      const previous = previousCalls.get(call.id);
+      if (
+        previous?.status === "applied" ||
+        previous?.status === "resumed_verified"
+      ) {
+        if (classifyLiveState(call, live) !== "target") {
+          throw new AppError(
+            "AUTH0_WRITE_FAILED",
+            `Execution cannot resume because the previously applied change for ${call.resourceName} is no longer present. Review the tenant before continuing.`,
+          );
+        }
+        calls.push({
+          id: call.id,
+          endpoint: call.endpoint,
+          status: "resumed_verified",
+          correlationId,
+        });
+        continue;
+      }
+      if (previous?.status === "already_applied") {
+        if (classifyLiveState(call, live) !== "target") {
+          throw new AppError(
+            "AUTH0_WRITE_FAILED",
+            `Execution cannot resume because ${call.resourceName} no longer matches the previously verified target.`,
+          );
+        }
+        calls.push({
+          id: call.id,
+          endpoint: call.endpoint,
+          status: "already_applied",
+          correlationId,
+        });
+        continue;
+      }
       if (classifyLiveState(call, live) === "target") {
         calls.push({
           id: call.id,
@@ -560,10 +784,19 @@ export async function executeApiPlan(
         continue;
       }
       const body = requestBody(call, live);
+      const actual = apiRequestSha256(call.method, call.endpoint, body);
+      if (
+        call.validatedRequestSha256 &&
+        call.validatedRequestSha256 !== actual
+      ) {
+        throw new AppError(
+          "AUTH0_WRITE_FAILED",
+          `Execution stopped because the validated API request for ${call.resourceName} changed after package creation. Create and confirm a new dev package.`,
+        );
+      }
       const approvedDigests = options.approvedRequestDigests;
       if (approvedDigests) {
         const approved = approvedDigests[call.id];
-        const actual = apiRequestSha256(call.method, call.endpoint, body);
         if (!approved || approved !== actual) {
           throw new AppError(
             "AUTH0_WRITE_FAILED",
@@ -581,6 +814,7 @@ export async function executeApiPlan(
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(30_000),
       });
+      patchAccepted = response.ok;
       await responseJson(response, `Auth0 update for ${call.resourceName}`);
       const verified = await readLiveResource(
         fetcher,
@@ -588,12 +822,7 @@ export async function executeApiPlan(
         call,
         authorization,
       );
-      if (classifyLiveState(call, verified) !== "target") {
-        throw new AppError(
-          "AUTH0_WRITE_FAILED",
-          `Auth0 did not retain the planned settings for ${call.resourceName}.`,
-        );
-      }
+      verifyAppliedState(call, live, verified);
       calls.push({
         id: call.id,
         endpoint: call.endpoint,
@@ -605,11 +834,12 @@ export async function executeApiPlan(
       calls.push({
         id: call.id,
         endpoint: call.endpoint,
-        status: "failed",
+        status: patchAccepted ? "verification_failed" : "failed",
         correlationId,
         error: message,
       });
       return {
+        operation: "apply",
         status: "failed",
         startedAt,
         completedAt: now().toISOString(),
@@ -621,6 +851,133 @@ export async function executeApiPlan(
   }
 
   return {
+    operation: "apply",
+    status: "succeeded",
+    startedAt,
+    completedAt: now().toISOString(),
+    profile: "dev",
+    calls,
+  };
+}
+
+export async function rollbackApiPlan(
+  untrustedPlan: ApiPlan,
+  config: CheckmateConfig,
+  appliedExecution: ApiExecutionResult,
+  options: ApiPlanExecutorOptions = {},
+): Promise<ApiExecutionResult> {
+  const plan = apiPlanSchema.parse(untrustedPlan);
+  assertPlanTenant(plan, config, true);
+  if (config.profile !== "dev" || plan.profile !== "dev") {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      "API plan rollback is restricted to the dev profile.",
+    );
+  }
+  if (appliedExecution.operation !== "apply") {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      "Rollback requires a previous apply execution record.",
+    );
+  }
+  const eligible = new Set(
+    appliedExecution.calls
+      .filter(
+        (call) =>
+          call.status === "applied" ||
+          call.status === "resumed_verified" ||
+          call.status === "verification_failed",
+      )
+      .map((call) => call.id),
+  );
+  if (eligible.size === 0) {
+    throw new AppError(
+      "AUTH0_WRITE_FAILED",
+      "No applied changes are available to roll back.",
+    );
+  }
+
+  const fetcher = options.fetcher ?? fetch;
+  const now = options.now ?? (() => new Date());
+  const startedAt = now().toISOString();
+  const baseUrl = tenantBaseUrl(config.domain);
+  const authorization = await managementAuthorization(
+    fetcher,
+    baseUrl,
+    config,
+    scopesFor(plan, "read_write"),
+    "execution",
+  );
+  const calls: ApiCallExecution[] = [];
+
+  for (const original of [...plan.calls].reverse()) {
+    if (!eligible.has(original.id)) continue;
+    const call = inverseCall(original);
+    const correlationId = `checkmate-rollback-${randomUUID()}`.slice(0, 64);
+    try {
+      const live = await readLiveResource(
+        fetcher,
+        baseUrl,
+        call,
+        authorization,
+      );
+      if (classifyLiveState(call, live) === "target") {
+        calls.push({
+          id: call.id,
+          endpoint: call.endpoint,
+          status: "rollback_already_applied",
+          correlationId,
+        });
+        continue;
+      }
+      const body = requestBody(call, live);
+      const response = await fetcher(new URL(call.endpoint, baseUrl), {
+        method: "PATCH",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          "x-correlation-id": correlationId,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+      await responseJson(response, `Auth0 rollback for ${call.resourceName}`);
+      const verified = await readLiveResource(
+        fetcher,
+        baseUrl,
+        call,
+        authorization,
+      );
+      verifyAppliedState(call, live, verified);
+      calls.push({
+        id: call.id,
+        endpoint: call.endpoint,
+        status: "rolled_back",
+        correlationId,
+      });
+    } catch (error) {
+      const message = toErrorMessage(error);
+      calls.push({
+        id: call.id,
+        endpoint: call.endpoint,
+        status: "rollback_failed",
+        correlationId,
+        error: message,
+      });
+      return {
+        operation: "rollback",
+        status: "failed",
+        startedAt,
+        completedAt: now().toISOString(),
+        profile: "dev",
+        calls,
+        error: message,
+      };
+    }
+  }
+
+  return {
+    operation: "rollback",
     status: "succeeded",
     startedAt,
     completedAt: now().toISOString(),

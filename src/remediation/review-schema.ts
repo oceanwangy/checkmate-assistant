@@ -35,8 +35,32 @@ export const reviewEntrySchema = z.object({
 const executionCallSchema = z.object({
   id: z.string().min(1),
   endpoint: z.string().startsWith("/api/v2/"),
-  status: z.enum(["applied", "already_applied", "failed"]),
+  status: z.enum([
+    "applied",
+    "already_applied",
+    "resumed_verified",
+    "verification_failed",
+    "failed",
+    "rolled_back",
+    "rollback_already_applied",
+    "rollback_failed",
+  ]),
   correlationId: z.string().min(1).max(64),
+  error: z.string().min(1).optional(),
+});
+
+const executionRecordSchema = z.object({
+  planFile: z.string().min(1),
+  planSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  operation: z.enum(["apply", "rollback"]).default("apply"),
+  status: z.enum(["succeeded", "failed"]),
+  startedAt: z.string().datetime(),
+  completedAt: z.string().datetime(),
+  profile: z.literal("dev"),
+  calls: z.array(executionCallSchema),
   error: z.string().min(1).optional(),
 });
 
@@ -54,21 +78,8 @@ export const reviewSessionSchema = z.object({
     completedAt: z.string().datetime().optional(),
   }),
   decisions: z.array(reviewEntrySchema),
-  execution: z
-    .object({
-      planFile: z.string().min(1),
-      planSha256: z
-        .string()
-        .regex(/^[a-f0-9]{64}$/)
-        .optional(),
-      status: z.enum(["succeeded", "failed"]),
-      startedAt: z.string().datetime(),
-      completedAt: z.string().datetime(),
-      profile: z.literal("dev"),
-      calls: z.array(executionCallSchema),
-      error: z.string().min(1).optional(),
-    })
-    .optional(),
+  execution: executionRecordSchema.optional(),
+  executionHistory: z.array(executionRecordSchema).optional(),
 });
 
 export type ReviewAnswer = z.infer<typeof reviewAnswerSchema>;

@@ -1,46 +1,102 @@
-export const POSTURE_MODEL_VERSION = "auth0-posture-v1";
+import type { CheckmatePriority } from "../findings/types.js";
 
-export const POSTURE_CATEGORIES = [
-  {
-    id: "authentication",
-    title: "Authentication and attack protection",
-    budget: 30,
-  },
-  {
-    id: "applications",
-    title: "Application and OAuth security",
-    budget: 25,
-  },
-  {
-    id: "tokens",
-    title: "Token and API security",
-    budget: 20,
-  },
-  {
-    id: "tenant",
-    title: "Tenant and administration boundaries",
-    budget: 15,
-  },
-  {
-    id: "operations",
-    title: "Monitoring and secure operations",
-    budget: 10,
-  },
-] as const;
+export const POSTURE_MODEL_VERSION = "checkmate-1.8.3";
 
-export type PostureCategoryId = (typeof POSTURE_CATEGORIES)[number]["id"];
-export type PostureImportance = "foundational" | "high" | "moderate" | "low";
+export type ScoredCheckmatePriority = "red" | "yellow" | "green";
 
-export const POSTURE_IMPORTANCE_WEIGHTS: Record<PostureImportance, number> = {
-  foundational: 4,
-  high: 3,
-  moderate: 2,
-  low: 1,
+export const CHECKMATE_PRIORITY_POINTS: Record<
+  ScoredCheckmatePriority,
+  number
+> = {
+  red: 5,
+  yellow: 3,
+  green: 1,
 };
 
+export interface PostureControl {
+  validatorId: string;
+  title: string;
+  priority: ScoredCheckmatePriority;
+}
+
+const control = (
+  validatorId: string,
+  title: string,
+  priority: ScoredCheckmatePriority,
+): PostureControl => ({ validatorId, title, priority });
+
+/**
+ * The complete set of red, yellow, and green validators registered by
+ * @auth0/auth0-checkmate 1.8.3. Blue informational and violet GenAI
+ * validators remain visible in the report but do not contribute points.
+ */
+export const POSTURE_CONTROLS: readonly PostureControl[] = [
+  control("checkActionsRuntime", "Actions runtime", "red"),
+  control("checkAllowedCallbacks", "Allowed callback URLs", "red"),
+  control(
+    "checkCrossOriginAuthentication",
+    "Cross-origin authentication",
+    "red",
+  ),
+  control("checkCustomDomain", "Custom domain", "red"),
+  control("checkDependencies", "Extension dependency versions", "red"),
+  control("checkErrorPageTemplate", "Error page template", "red"),
+  control("checkGrantTypes", "OAuth grant types", "red"),
+  control("checkJWTSignAlg", "Application JWT signing algorithm", "red"),
+  control("checkManagementAPIUserAccess", "Management API user access", "red"),
+  control("checkPasswordPolicy", "Password policy", "red"),
+  control("checkSandboxVersion", "Extensibility runtime", "red"),
+  control("checkWebOrigins", "Allowed web origins", "red"),
+
+  control("checkAPIAuthorizationPolicy", "API authorization policy", "yellow"),
+  control("checkAPISigningAlgorithm", "API signing algorithm", "yellow"),
+  control("checkAuthenticationMethods", "Authentication methods", "yellow"),
+  control("checkBackchannelLogout", "Back-channel logout", "yellow"),
+  control("checkBlockCanonicalDomain", "Canonical domain blocking", "yellow"),
+  control("checkBreachedPassword", "Breached-password protection", "yellow"),
+  control("checkCanonicalDomain", "Canonical domain", "yellow"),
+  control("checkDASHardCodedValues", "Secrets in database scripts", "yellow"),
+  control("checkEmailAttributeVerification", "Email verification", "yellow"),
+  control("checkEmailProvider", "Email provider", "yellow"),
+  control("checkGuardianFactors", "Strong MFA factors", "yellow"),
+  control("checkLogStream", "Security log streaming", "yellow"),
+  control("checkNetworkACL", "Tenant access control list", "yellow"),
+  control("checkPasswordComplexity", "Password complexity", "yellow"),
+  control(
+    "checkPasswordNoPersonalInfo",
+    "Personal information in passwords",
+    "yellow",
+  ),
+  control("checkPasswordResetMFA", "MFA during password reset", "yellow"),
+  control("checkRefreshToken", "Refresh-token configuration", "yellow"),
+
+  control("checkAllowedLogoutUrl", "Allowed logout URLs", "green"),
+  control(
+    "checkAppTokenSenderConstraining",
+    "Application token sender-constraining",
+    "green",
+  ),
+  control("checkManagementAPIACL", "Management API access control", "green"),
+  control("checkPasswordHistory", "Password history", "green"),
+  control("checkPKCEEnforcement", "PKCE enforcement", "green"),
+  control(
+    "checkPreRegistrationUserEnumeration",
+    "Pre-registration user enumeration",
+    "green",
+  ),
+  control(
+    "checkTokenConstrainingResourceServer",
+    "API token sender-constraining",
+    "green",
+  ),
+];
+
+export const POSTURE_MAXIMUM_SCORE = POSTURE_CONTROLS.reduce(
+  (total, item) => total + CHECKMATE_PRIORITY_POINTS[item.priority],
+  0,
+);
+
 export const POSTURE_REVIEW_GUIDANCE: Readonly<Record<string, string>> = {
-  checkGuardianPolicy:
-    "Review the MFA policy and require MFA for the appropriate users and applications.",
   checkPasswordResetMFA:
     "Review the password reset flow and require MFA for privileged or sensitive accounts.",
   checkCrossOriginAuthentication:
@@ -51,203 +107,57 @@ export const POSTURE_REVIEW_GUIDANCE: Readonly<Record<string, string>> = {
     "Review refresh-token rotation and expiry settings for applications that use refresh tokens.",
   checkManagementAPIUserAccess:
     "Identify approved applications, then restrict Management API user access to that approved set.",
-  checkEnabledDynamicClientRegistration:
-    "Disable dynamic client registration unless the tenant has a documented requirement for it.",
   checkLogStream:
     "Configure a log stream to the organisation's monitoring or SIEM destination.",
 };
 
-export interface PostureControl {
-  validatorId: string;
-  title: string;
-  category: PostureCategoryId;
-  importance: PostureImportance;
+export interface PostureRecommendationImpact {
+  label: string;
+  points: number;
 }
 
-const control = (
-  validatorId: string,
-  title: string,
-  category: PostureCategoryId,
-  importance: PostureImportance,
-): PostureControl => ({
-  validatorId,
-  title,
-  category,
-  importance,
-});
+function priorityFromSeverity(
+  severity: string | undefined,
+): CheckmatePriority | undefined {
+  switch (severity?.trim().toLowerCase()) {
+    case "high":
+      return "red";
+    case "moderate":
+    case "medium":
+      return "yellow";
+    case "low":
+      return "green";
+    case "info":
+      return "blue";
+    case "genai":
+      return "violet";
+    default:
+      return undefined;
+  }
+}
 
-/**
- * A deliberately curated security-control catalog. CheckMate severity is useful
- * evidence, but it is not used as the posture weight: some important controls,
- * such as MFA policy, are informational findings in the source report.
- */
-export const POSTURE_CONTROLS: readonly PostureControl[] = [
-  control(
-    "checkGuardianPolicy",
-    "MFA policy",
-    "authentication",
-    "foundational",
-  ),
-  control(
-    "checkBruteForce",
-    "Brute-force protection",
-    "authentication",
-    "foundational",
-  ),
-  control(
-    "checkBreachedPassword",
-    "Breached-password protection",
-    "authentication",
-    "foundational",
-  ),
-  control(
-    "checkSuspiciousIPThrottling",
-    "Suspicious IP throttling",
-    "authentication",
-    "high",
-  ),
-  control(
-    "checkGuardianFactors",
-    "Strong MFA factors",
-    "authentication",
-    "high",
-  ),
-  control("checkPasswordPolicy", "Password policy", "authentication", "high"),
-  control(
-    "checkPasswordComplexity",
-    "Password complexity",
-    "authentication",
-    "high",
-  ),
-  control(
-    "checkPasswordNoPersonalInfo",
-    "Personal information in passwords",
-    "authentication",
-    "moderate",
-  ),
-  control("checkPasswordHistory", "Password history", "authentication", "low"),
-  control(
-    "checkPasswordResetMFA",
-    "MFA during password reset",
-    "authentication",
-    "high",
-  ),
-  control(
-    "checkUserEnumeration",
-    "User enumeration protection",
-    "authentication",
-    "moderate",
-  ),
-  control(
-    "checkAuthenticationMethods",
-    "Authentication methods",
-    "authentication",
-    "moderate",
-  ),
-  control(
-    "checkEmailAttributeVerification",
-    "Email verification",
-    "authentication",
-    "moderate",
-  ),
-
-  control(
-    "checkJWTSignAlg",
-    "Application JWT signing algorithm",
-    "applications",
-    "foundational",
-  ),
-  control(
-    "checkAllowedCallbacks",
-    "Allowed callback URLs",
-    "applications",
-    "high",
-  ),
-  control("checkGrantTypes", "OAuth grant types", "applications", "high"),
-  control(
-    "checkCrossOriginAuthentication",
-    "Cross-origin authentication",
-    "applications",
-    "high",
-  ),
-  control("checkWebOrigins", "Allowed web origins", "applications", "high"),
-  control("checkPKCEEnforcement", "PKCE enforcement", "applications", "high"),
-  control(
-    "checkRefreshToken",
-    "Refresh-token configuration",
-    "applications",
-    "high",
-  ),
-  control(
-    "checkAllowedLogoutUrl",
-    "Allowed logout URLs",
-    "applications",
-    "low",
-  ),
-  control(
-    "checkAPISigningAlgorithm",
-    "API signing algorithm",
-    "tokens",
-    "foundational",
-  ),
-  control("checkAPITokenLifetime", "API token lifetime", "tokens", "high"),
-  control(
-    "checkAPIAuthorizationPolicy",
-    "API authorization policy",
-    "tokens",
-    "high",
-  ),
-  control(
-    "checkManagementAPIUserAccess",
-    "Management API user access",
-    "tenant",
-    "high",
-  ),
-  control("checkCanonicalDomain", "Canonical domain", "tenant", "moderate"),
-  control(
-    "checkBlockCanonicalDomain",
-    "Canonical domain blocking",
-    "tenant",
-    "moderate",
-  ),
-  control(
-    "checkEnabledDynamicClientRegistration",
-    "Dynamic client registration",
-    "tenant",
-    "high",
-  ),
-  control("checkDefaultAudience", "Default API audience", "tenant", "low"),
-  control("checkDefaultDirectory", "Default directory", "tenant", "low"),
-  control(
-    "checkEnabledDatabaseCustomization",
-    "Database customisation",
-    "tenant",
-    "moderate",
-  ),
-  control("checkLogStream", "Security log streaming", "operations", "high"),
-  control(
-    "checkActionsHardCodedValues",
-    "Secrets in Actions",
-    "operations",
-    "high",
-  ),
-  control(
-    "checkDASHardCodedValues",
-    "Secrets in database scripts",
-    "operations",
-    "high",
-  ),
-  control(
-    "checkDependencies",
-    "Extension dependency versions",
-    "operations",
-    "high",
-  ),
-  control("checkActionsRuntime", "Actions runtime", "operations", "moderate"),
-  control(
-    "checkSessionLifetime",
-    "Tenant session lifetime",
-    "operations",
-    "moderate",
-  ),
-];
+export function postureRecommendationImpact(
+  validatorId: string | undefined,
+  reportPriority?: CheckmatePriority,
+  severity?: string,
+): PostureRecommendationImpact {
+  const catalogPriority = POSTURE_CONTROLS.find(
+    (item) => item.validatorId === validatorId,
+  )?.priority;
+  const priority =
+    catalogPriority ?? reportPriority ?? priorityFromSeverity(severity);
+  switch (priority) {
+    case "red":
+      return { label: "High priority", points: 5 };
+    case "yellow":
+      return { label: "Moderate priority", points: 3 };
+    case "green":
+      return { label: "Low priority", points: 1 };
+    case "blue":
+      return { label: "Information only", points: 0 };
+    case "violet":
+      return { label: "GenAI insight", points: 0 };
+    default:
+      return { label: "Unscored", points: 0 };
+  }
+}

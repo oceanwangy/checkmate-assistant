@@ -1,4 +1,5 @@
 export type FindingStatus = "passed" | "failed" | "warning" | "unknown";
+export type CheckmatePriority = "red" | "yellow" | "green" | "blue" | "violet";
 
 export interface AffectedResource {
   type?: string;
@@ -11,6 +12,7 @@ export interface NormalizedCheckmateFinding {
   validatorId?: string;
   title: string;
   status: FindingStatus;
+  priority?: CheckmatePriority;
   severity?: string;
   description?: string;
   recommendation?: string;

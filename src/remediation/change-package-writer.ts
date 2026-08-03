@@ -5,6 +5,7 @@ import type { ProfileName } from "../config/profiles.js";
 
 export interface EnvironmentArtifactPaths {
   apiPlan: string;
+  shell: string;
   terraform: string;
 }
 
@@ -22,6 +23,7 @@ export function createChangePackagePaths(
     const environmentDirectory = path.join(directory, profile);
     return {
       apiPlan: path.join(environmentDirectory, "api-plan.yml"),
+      shell: path.join(environmentDirectory, "apply-api-plan.sh"),
       terraform: path.join(environmentDirectory, "main.tf"),
     };
   };
@@ -35,9 +37,10 @@ export function createChangePackagePaths(
 export async function writeTextArtifact(
   outputPath: string,
   content: string,
+  mode = 0o600,
 ): Promise<void> {
   await ensureDirectory(path.dirname(outputPath));
   const temporaryPath = `${outputPath}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600 });
+  await writeFile(temporaryPath, content, { encoding: "utf8", mode });
   await rename(temporaryPath, outputPath);
 }

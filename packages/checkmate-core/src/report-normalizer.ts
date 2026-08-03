@@ -6,10 +6,25 @@ import {
 } from "./report-schema.js";
 import type {
   AffectedResource,
+  CheckmatePriority,
   FindingStatus,
   NormalizedCheckmateFinding,
   NormalizedCheckmateReport,
 } from "./types.js";
+
+const CHECKMATE_PRIORITIES = new Set<CheckmatePriority>([
+  "red",
+  "yellow",
+  "green",
+  "blue",
+  "violet",
+]);
+
+function normalizePriority(value: unknown): CheckmatePriority | undefined {
+  if (typeof value !== "string") return undefined;
+  const priority = value.trim().toLowerCase() as CheckmatePriority;
+  return CHECKMATE_PRIORITIES.has(priority) ? priority : undefined;
+}
 
 const ARRAY_KEYS = [
   "findings",
@@ -163,6 +178,9 @@ function normalizeOne(
     status,
     raw: source,
   };
+
+  const priority = normalizePriority(parent?.status ?? source.status);
+  if (priority) finding.priority = priority;
 
   if (validatorId) finding.validatorId = validatorId;
   if (severity) finding.severity = severity;

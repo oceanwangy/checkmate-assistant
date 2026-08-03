@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
+import { unlink } from "node:fs/promises";
 import path from "node:path";
+import type { CheckmateConfig } from "../config/env.js";
 import { toErrorMessage } from "../utils/errors.js";
 
 const OUTPUT_LIMIT = 200_000;
@@ -27,11 +29,80 @@ export interface TerraformValidationResult {
   validatedAt: string;
   terraformFile: string;
   steps: Array<{
-    command: "fmt" | "init" | "validate";
+    command: "fmt" | "init" | "validate" | "plan" | "show";
     valid: boolean;
     message: string;
   }>;
   error?: string;
+}
+
+interface TerraformPlannedChange {
+  address?: unknown;
+  mode?: unknown;
+  type?: unknown;
+  change?: {
+    actions?: unknown;
+    importing?: unknown;
+  };
+}
+
+function validatePlanJson(content: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch (error) {
+    throw new Error("Terraform returned an unreadable JSON plan.", {
+      cause: error,
+    });
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error("Terraform returned an invalid JSON plan.");
+  }
+  const resourceChanges = (parsed as { resource_changes?: unknown })
+    .resource_changes;
+  if (resourceChanges !== undefined && !Array.isArray(resourceChanges)) {
+    throw new Error("Terraform returned invalid resource changes.");
+  }
+  for (const item of (resourceChanges ?? []) as TerraformPlannedChange[]) {
+    if (item === null || typeof item !== "object") {
+      throw new Error("Terraform returned an invalid planned resource.");
+    }
+    const actions = item.change?.actions;
+    if (
+      !Array.isArray(actions) ||
+      actions.some((action) => typeof action !== "string")
+    ) {
+      throw new Error("Terraform returned invalid planned actions.");
+    }
+    const address =
+      typeof item.address === "string" ? item.address : "resource";
+    if (actions.includes("delete")) {
+      throw new Error(
+        `Terraform validation rejected a destructive change for ${address}.`,
+      );
+    }
+    if (
+      item.mode !== "data" &&
+      actions.includes("create") &&
+      item.change?.importing === undefined
+    ) {
+      throw new Error(
+        `Terraform validation rejected an unimported resource creation for ${address}.`,
+      );
+    }
+    if (
+      item.mode !== "data" &&
+      typeof item.type === "string" &&
+      !["auth0_client", "auth0_connection", "auth0_attack_protection"].includes(
+        item.type,
+      )
+    ) {
+      throw new Error(
+        `Terraform validation rejected an unexpected managed resource type: ${item.type}.`,
+      );
+    }
+  }
+  return "Terraform plan is executable and contains no destroy, replacement, or unimported create actions.";
 }
 
 function appendLimited(current: string, chunk: Buffer | string): string {
@@ -77,7 +148,13 @@ export const spawnTerraformCommand: TerraformCommandRunner = async (request) =>
     });
   });
 
-function safeTerraformEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function safeTerraformEnvironment(
+  env: NodeJS.ProcessEnv,
+  providerConfig?: Pick<
+    CheckmateConfig,
+    "domain" | "clientId" | "clientSecret"
+  >,
+): NodeJS.ProcessEnv {
   const allowed = [
     "PATH",
     "HOME",
@@ -89,7 +166,7 @@ function safeTerraformEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
   ];
-  return {
+  const safeEnvironment: NodeJS.ProcessEnv = {
     ...Object.fromEntries(
       allowed.flatMap((key) =>
         env[key] === undefined ? [] : [[key, env[key]]],
@@ -98,6 +175,12 @@ function safeTerraformEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     TF_IN_AUTOMATION: "1",
     CHECKPOINT_DISABLE: "1",
   };
+  if (providerConfig) {
+    safeEnvironment.AUTH0_DOMAIN = providerConfig.domain;
+    safeEnvironment.AUTH0_CLIENT_ID = providerConfig.clientId;
+    safeEnvironment.AUTH0_CLIENT_SECRET = providerConfig.clientSecret;
+  }
+  return safeEnvironment;
 }
 
 export async function validateTerraformConfiguration(
@@ -105,26 +188,48 @@ export async function validateTerraformConfiguration(
   options: {
     runner?: TerraformCommandRunner;
     env?: NodeJS.ProcessEnv;
+    providerConfig?: Pick<
+      CheckmateConfig,
+      "domain" | "clientId" | "clientSecret"
+    >;
     now?: () => Date;
   } = {},
 ): Promise<TerraformValidationResult> {
   const runner = options.runner ?? spawnTerraformCommand;
   const cwd = path.dirname(terraformFile);
-  const env = safeTerraformEnvironment(options.env ?? process.env);
+  const env = safeTerraformEnvironment(
+    options.env ?? process.env,
+    options.providerConfig,
+  );
   const now = options.now ?? (() => new Date());
   const steps: TerraformValidationResult["steps"] = [];
   const commands = [
     {
       command: "fmt" as const,
-      args: ["fmt", "-check", "-no-color", path.basename(terraformFile)],
+      args: ["fmt", "-no-color", path.basename(terraformFile)],
     },
     {
       command: "init" as const,
-      args: ["init", "-backend=false", "-input=false", "-no-color"],
+      args: ["init", "-upgrade", "-backend=false", "-input=false", "-no-color"],
     },
     {
       command: "validate" as const,
       args: ["validate", "-no-color"],
+    },
+    {
+      command: "plan" as const,
+      args: [
+        "plan",
+        "-input=false",
+        "-lock=false",
+        "-no-color",
+        "-detailed-exitcode",
+        "-out=.checkmate-validation.tfplan",
+      ],
+    },
+    {
+      command: "show" as const,
+      args: ["show", "-json", ".checkmate-validation.tfplan"],
     },
   ];
   try {
@@ -135,20 +240,49 @@ export async function validateTerraformConfiguration(
         env,
         timeoutMs: 120_000,
       });
-      const message =
-        result.stdout.trim() || result.stderr.trim() || "Validation passed.";
+      let message =
+        [result.stdout.trim(), result.stderr.trim()]
+          .filter(Boolean)
+          .join("\n") || "Validation passed.";
+      const validExitCode =
+        result.exitCode === 0 ||
+        (command.command === "plan" && result.exitCode === 2);
       steps.push({
         command: command.command,
-        valid: result.exitCode === 0,
+        valid: validExitCode,
         message,
       });
-      if (result.exitCode !== 0) {
+      if (!validExitCode) {
         return {
           valid: false,
           validatedAt: now().toISOString(),
           terraformFile,
           steps,
           error: message,
+        };
+      }
+      if (command.command === "show") {
+        try {
+          message = validatePlanJson(result.stdout);
+        } catch (error) {
+          const unsafeMessage = toErrorMessage(error);
+          steps[steps.length - 1] = {
+            command: command.command,
+            valid: false,
+            message: unsafeMessage,
+          };
+          return {
+            valid: false,
+            validatedAt: now().toISOString(),
+            terraformFile,
+            steps,
+            error: unsafeMessage,
+          };
+        }
+        steps[steps.length - 1] = {
+          command: command.command,
+          valid: true,
+          message,
         };
       }
     }
@@ -167,5 +301,9 @@ export async function validateTerraformConfiguration(
       steps,
       error: message,
     };
+  } finally {
+    await unlink(path.join(cwd, ".checkmate-validation.tfplan")).catch(
+      () => undefined,
+    );
   }
 }

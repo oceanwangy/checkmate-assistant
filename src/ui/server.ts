@@ -17,10 +17,15 @@ import {
 } from "../auth0/configuration-reader.js";
 import {
   executeApiPlan,
+  rollbackApiPlan,
   validateApiPlan,
   type ApiExecutionResult,
   type ApiPlanValidationResult,
 } from "../auth0/api-plan-executor.js";
+import {
+  assessProductionCredentialAccess,
+  type ProductionCredentialAccessResult,
+} from "../auth0/production-credential-access.js";
 import { loadCheckmateReport } from "../checkmate/report-loader.js";
 import { executeScan } from "../commands/scan.js";
 import { loadAiConfig } from "../config/ai.js";
@@ -37,12 +42,21 @@ import { buildActionCandidates } from "../remediation/action-candidates.js";
 import type { ApiPlan } from "../remediation/api-plan.js";
 import { readApiPlan, writeApiPlan } from "../remediation/api-plan-writer.js";
 import {
+  assertValidatedApiPlan,
+  finalizeValidatedApiPlan,
+} from "../remediation/validated-api-plan.js";
+import {
   createChangePackagePaths,
   type ChangePackagePaths,
   writeTextArtifact,
 } from "../remediation/change-package-writer.js";
 import { buildProfileApiPlan } from "../remediation/profile-api-plan.js";
-import { buildTerraformReviewConfiguration } from "../remediation/terraform-plan.js";
+import { buildApiPlanShellScript } from "../remediation/api-plan-shell.js";
+import {
+  buildTerraformDeploymentConfiguration,
+  terraformCoverage,
+  type TerraformCoverage,
+} from "../remediation/terraform-plan.js";
 import {
   validateTerraformConfiguration,
   type TerraformValidationResult,
@@ -59,7 +73,10 @@ import {
 } from "../remediation/review-writer.js";
 import { toErrorMessage } from "../utils/errors.js";
 import { evaluatePosture } from "../posture/evaluator.js";
-import { POSTURE_REVIEW_GUIDANCE } from "../posture/control-catalog.js";
+import {
+  postureRecommendationImpact,
+  POSTURE_REVIEW_GUIDANCE,
+} from "../posture/control-catalog.js";
 
 const HOST = "127.0.0.1";
 const MAX_BODY_BYTES = 1_000_000;
@@ -78,12 +95,13 @@ const decisionRequestSchema = z
   .strict();
 const submitRequestSchema = z.object({}).strict();
 const executeRequestSchema = z.object({ confirmed: z.literal(true) }).strict();
+const rollbackRequestSchema = z.object({ confirmed: z.literal(true) }).strict();
 const scanRequestSchema = z
   .object({ profile: z.enum(["dev", "prod"]) })
   .strict();
 const artifactRequestSchema = z.object({
   profile: z.enum(["dev", "prod"]),
-  artifact: z.enum(["api", "terraform"]),
+  artifact: z.enum(["api", "shell", "terraform"]),
   download: z.enum(["0", "1"]).optional(),
 });
 
@@ -102,7 +120,9 @@ export interface UiServerDependencies {
   now?: () => Date;
   configurationLoader?: typeof loadActionableConfiguration;
   planExecutor?: typeof executeApiPlan;
+  planRollbackExecutor?: typeof rollbackApiPlan;
   apiPlanValidator?: typeof validateApiPlan;
+  productionCredentialAccessInspector?: typeof assessProductionCredentialAccess;
   terraformValidator?: typeof validateTerraformConfiguration;
   scanExecutor?: typeof executeScan;
 }
@@ -121,25 +141,32 @@ interface CachedRecommendation {
   key: string;
   title: string;
   analysis: AiFindingAnalysis;
-  selectionMode: "single" | "applications" | "changes";
+  selectionMode:
+    "single" | "applications" | "connections" | "alternatives" | "changes";
+  defaultSelected: boolean;
   actions: Array<{
     actionId: string;
     finding: NormalizedCheckmateFinding;
     actionableChange: ActionableChange;
+    optionLabel?: string;
+    optionDescription?: string;
   }>;
 }
 
 interface EnvironmentChangePackage {
+  tenantDomain: string;
   plan: ApiPlan;
   apiPlanSha256: string;
   apiValidation: ApiPlanValidationResult;
   terraformValidation: TerraformValidationResult;
+  terraformCoverage: TerraformCoverage;
 }
 
 interface SubmittedChangePackage {
   paths: ChangePackagePaths;
   dev: EnvironmentChangePackage;
   prod: EnvironmentChangePackage;
+  prodCredentialAccess: ProductionCredentialAccessResult;
 }
 
 const deterministicApplicationGroups = [
@@ -155,6 +182,7 @@ const deterministicApplicationGroups = [
       "This prevents tokens from being returned directly through the browser flow.",
       "Other configured grant types remain unchanged.",
     ],
+    defaultSelected: false,
   },
   {
     key: "applications-use-rs256",
@@ -166,6 +194,7 @@ const deterministicApplicationGroups = [
       "RS256 uses asymmetric signing and keeps verification separate from signing.",
       "Other JWT settings remain unchanged.",
     ],
+    defaultSelected: false,
   },
   {
     key: "applications-disable-cross-origin",
@@ -180,6 +209,56 @@ const deterministicApplicationGroups = [
       "This removes an unnecessary browser-based authentication surface.",
       "Cross-origin authentication should be disabled.",
     ],
+    defaultSelected: true,
+  },
+] as const;
+
+const deterministicConnectionGroups = [
+  {
+    key: "connections-enable-password-history",
+    validatorId: "checkPasswordHistory",
+    configPath: "options.password_history.enable",
+    title: "Enable password history",
+    whatItMeans: [
+      "These database connections currently allow users to reuse previous passwords.",
+    ],
+    suggestion: "Enable password history for selected database connections.",
+    reason: [
+      "Password history prevents users from reusing recently used passwords.",
+      "Other database connection settings remain unchanged.",
+    ],
+    defaultSelected: true,
+  },
+  {
+    key: "connections-block-personal-information",
+    validatorId: "checkPasswordNoPersonalInfo",
+    configPath: "options.password_no_personal_info.enable",
+    title: "Block personal information",
+    whatItMeans: [
+      "These database connections currently allow personal information in passwords.",
+    ],
+    suggestion:
+      "Block personal information in passwords for selected database connections.",
+    reason: [
+      "Personal information can make passwords easier to guess.",
+      "Other database connection settings remain unchanged.",
+    ],
+    defaultSelected: true,
+  },
+  {
+    key: "connections-enable-passkeys",
+    validatorId: "checkAuthenticationMethods",
+    configPath: "options.authentication_methods.passkey.enabled",
+    title: "Enable passkeys",
+    whatItMeans: [
+      "These database connections currently use passwords without passkeys as an authentication option.",
+    ],
+    suggestion: "Enable passkeys for selected database connections.",
+    reason: [
+      "Passkeys provide a phishing-resistant alternative to passwords.",
+      "Passkey prerequisites must be validated before the change is executed.",
+    ],
+    defaultSelected: false,
   },
 ] as const;
 
@@ -285,10 +364,10 @@ export async function startUiServer(
   let triaged = false;
   let recommendations: CachedRecommendation[] = [];
   const recommendationMap = new Map<string, CachedRecommendation>();
-  const postureActionIdsByValidator = new Map<string, Set<string>>();
   let triagePromise: Promise<void> | undefined;
   let submittedPackage: SubmittedChangePackage | undefined;
   let execution: ApiExecutionResult | undefined;
+  let executionHistory: ApiExecutionResult[] = [];
   let executing = false;
   let scanning = false;
 
@@ -334,7 +413,7 @@ export async function startUiServer(
     findings = selectedFindings;
     cachedFindings = findings.map((finding) => ({ finding }));
     reportValidatorCount = new Set(
-      selectedFindings.map((finding) => finding.validatorId ?? finding.id),
+      loaded.findings.map((finding) => finding.validatorId ?? finding.id),
     ).size;
     profile = resolveReviewProfile(
       requestedProfile ?? options.profile,
@@ -346,10 +425,10 @@ export async function startUiServer(
     triaged = false;
     recommendations = [];
     recommendationMap.clear();
-    postureActionIdsByValidator.clear();
     triagePromise = undefined;
     submittedPackage = undefined;
     execution = undefined;
+    executionHistory = [];
     executing = false;
   };
 
@@ -374,15 +453,49 @@ export async function startUiServer(
       ),
     );
 
+  const lastApplyExecution = (): ApiExecutionResult | undefined =>
+    [...executionHistory]
+      .reverse()
+      .find((attempt) => attempt.operation === "apply");
+
+  const rollbackAvailable = (): boolean => {
+    let applyIndex = -1;
+    for (let index = executionHistory.length - 1; index >= 0; index -= 1) {
+      if (executionHistory[index]?.operation === "apply") {
+        applyIndex = index;
+        break;
+      }
+    }
+    if (applyIndex < 0) return false;
+    const applied = executionHistory[applyIndex];
+    if (
+      !applied?.calls.some(
+        (call) =>
+          call.status === "applied" ||
+          call.status === "resumed_verified" ||
+          call.status === "verification_failed",
+      )
+    ) {
+      return false;
+    }
+    return !executionHistory
+      .slice(applyIndex + 1)
+      .some(
+        (attempt) =>
+          attempt.operation === "rollback" && attempt.status === "succeeded",
+      );
+  };
+
   const runApiValidation = async (
     plan: ApiPlan,
     config: CheckmateConfig,
+    authorizationMode: "read_only" | "read_write" = "read_write",
   ): Promise<ApiPlanValidationResult> => {
     try {
       return await (dependencies.apiPlanValidator ?? validateApiPlan)(
         plan,
         config,
-        { now },
+        { now, authorizationMode },
       );
     } catch (error) {
       return {
@@ -397,11 +510,31 @@ export async function startUiServer(
 
   const runTerraformValidation = (
     terraformFile: string,
+    config: CheckmateConfig,
   ): Promise<TerraformValidationResult> =>
     (dependencies.terraformValidator ?? validateTerraformConfiguration)(
       terraformFile,
-      { env, now },
+      { env, now, providerConfig: config },
     );
+
+  const inspectProductionCredential = async (
+    config: CheckmateConfig,
+  ): Promise<ProductionCredentialAccessResult> => {
+    try {
+      return await (
+        dependencies.productionCredentialAccessInspector ??
+        assessProductionCredentialAccess
+      )(config, { now });
+    } catch {
+      return {
+        status: "unverified",
+        checkedAt: now().toISOString(),
+        writeScopes: [],
+        message:
+          "Production credential access could not be verified. Package creation continued; confirm that the client grant is read-only in the Auth0 Dashboard.",
+      };
+    }
+  };
 
   const applyTriage = (
     items: readonly AiReportTriageItem[],
@@ -442,6 +575,47 @@ export async function startUiServer(
         key: group.key,
         title: group.title,
         selectionMode: "applications",
+        defaultSelected: group.defaultSelected,
+        actions,
+        analysis: {
+          whatItMeans: [...group.whatItMeans],
+          whyItMatters: [...group.reason],
+          questions: [],
+          remediationConsiderations: [group.suggestion],
+        },
+      };
+      recommendations.push(recommendation);
+      recommendationMap.set(recommendation.key, recommendation);
+    }
+    for (const group of deterministicConnectionGroups) {
+      const actions = [...actionMap.values()].flatMap((candidate) => {
+        if (
+          candidate.change.resourceType !== "connection" ||
+          candidate.change.configPath !== group.configPath
+        ) {
+          return [];
+        }
+        const item = cachedFindings.find(
+          ({ finding }) =>
+            finding.id === candidate.findingId &&
+            finding.validatorId === group.validatorId,
+        );
+        if (!item) return [];
+        deterministicActionIds.add(candidate.actionId);
+        return [
+          {
+            actionId: candidate.actionId,
+            finding: item.finding,
+            actionableChange: candidate.change,
+          },
+        ];
+      });
+      if (actions.length === 0) continue;
+      const recommendation: CachedRecommendation = {
+        key: group.key,
+        title: group.title,
+        selectionMode: "connections",
+        defaultSelected: group.defaultSelected,
         actions,
         analysis: {
           whatItMeans: [...group.whatItMeans],
@@ -488,6 +662,7 @@ export async function startUiServer(
         key: `callbacks-${first.actionId}`,
         title: `Remove insecure callback URLs from ${resourceName}`,
         selectionMode: "changes",
+        defaultSelected: false,
         actions,
         analysis: {
           whatItMeans: [
@@ -523,6 +698,7 @@ export async function startUiServer(
         key: selected.actionId,
         title: selected.recommendationTitle,
         selectionMode: "single",
+        defaultSelected: true,
         actions: [
           {
             actionId: selected.actionId,
@@ -539,17 +715,6 @@ export async function startUiServer(
       };
       recommendations.push(recommendation);
       recommendationMap.set(recommendation.key, recommendation);
-    }
-    postureActionIdsByValidator.clear();
-    for (const recommendation of recommendations) {
-      for (const action of recommendation.actions) {
-        const validatorId = action.finding.validatorId;
-        if (!validatorId) continue;
-        const actionIds =
-          postureActionIdsByValidator.get(validatorId) ?? new Set();
-        actionIds.add(action.actionId);
-        postureActionIdsByValidator.set(validatorId, actionIds);
-      }
     }
     triaged = true;
   };
@@ -570,14 +735,28 @@ export async function startUiServer(
       )(findings, profile);
       const aiConfiguration: ActionableConfigurationMap = new Map(
         [...configuration].flatMap(([findingId, changes]) => {
+          const sourceFinding = cachedFindings.find(
+            ({ finding }) => finding.id === findingId,
+          )?.finding;
           const filtered = changes.filter(
             (change) =>
               !(
-                change.resourceType === "client" &&
-                (change.configPath === "callbacks" ||
-                  deterministicApplicationGroups.some(
-                    (group) => group.configPath === change.configPath,
-                  ))
+                (change.resourceType === "client" &&
+                  (change.configPath === "callbacks" ||
+                    deterministicApplicationGroups.some(
+                      (group) => group.configPath === change.configPath,
+                    ))) ||
+                (change.resourceType === "connection" &&
+                  deterministicConnectionGroups.some(
+                    (group) =>
+                      group.validatorId === sourceFinding?.validatorId &&
+                      group.configPath === change.configPath,
+                  )) ||
+                (change.resourceType === "resource_server" &&
+                  sourceFinding?.validatorId ===
+                    "checkManagementAPIUserAccess" &&
+                  change.configPath ===
+                    "subject_type_authorization.user.policy")
               ),
           );
           return filtered.length > 0 ? [[findingId, filtered]] : [];
@@ -603,63 +782,87 @@ export async function startUiServer(
   };
 
   const state = () => {
-    const projectedValidatorProgress = new Map<string, number>();
-    for (const [validatorId, actionIds] of postureActionIdsByValidator) {
-      const approved = [...actionIds].filter((actionId) =>
-        session?.decisions.some(
-          (decision) =>
-            decision.actionableChangeId === actionId &&
-            decision.decision.status === "approved",
-        ),
-      ).length;
-      if (actionIds.size > 0) {
-        projectedValidatorProgress.set(validatorId, approved / actionIds.size);
+    const actionIdsByValidator = new Map<string, Set<string>>();
+    const resolutionRequirementsByValidator = new Map<string, boolean[]>();
+    for (const recommendation of recommendations) {
+      const recommendationActionIds = new Map<string, string[]>();
+      for (const action of recommendation.actions) {
+        const validatorId = action.finding.validatorId;
+        if (!validatorId) continue;
+        const actionIds = actionIdsByValidator.get(validatorId) ?? new Set();
+        actionIds.add(action.actionId);
+        actionIdsByValidator.set(validatorId, actionIds);
+        const grouped = recommendationActionIds.get(validatorId) ?? [];
+        grouped.push(action.actionId);
+        recommendationActionIds.set(validatorId, grouped);
+      }
+      for (const [validatorId, actionIds] of recommendationActionIds) {
+        const approved = actionIds.filter((actionId) =>
+          session?.decisions.some(
+            (decision) =>
+              decision.actionableChangeId === actionId &&
+              decision.decision.status === "approved",
+          ),
+        ).length;
+        const satisfied =
+          recommendation.selectionMode === "alternatives"
+            ? approved === 1
+            : approved === actionIds.length;
+        const requirements =
+          resolutionRequirementsByValidator.get(validatorId) ?? [];
+        requirements.push(satisfied);
+        resolutionRequirementsByValidator.set(validatorId, requirements);
+      }
+    }
+    const projectedResolvedValidatorIds = new Set<string>();
+    for (const [
+      validatorId,
+      requirements,
+    ] of resolutionRequirementsByValidator) {
+      if (requirements.length > 0 && requirements.every(Boolean)) {
+        projectedResolvedValidatorIds.add(validatorId);
       }
     }
     const posture = report
-      ? evaluatePosture(report.findings, { projectedValidatorProgress })
+      ? evaluatePosture(report.findings, {
+          projectedResolvedValidatorIds,
+        })
       : undefined;
     const projectedOpenControls = posture
-      ? [
-          ...posture.projected.openFoundationalControls.map((control) => ({
-            ...control,
-            importance: "Foundational" as const,
-          })),
-          ...posture.projected.openHighControls.map((control) => ({
-            ...control,
-            importance: "High impact" as const,
-          })),
-        ].map(({ validatorId, title, importance }) => ({
-          title,
-          importance,
-          guidance:
-            POSTURE_REVIEW_GUIDANCE[validatorId] ??
-            "Review this control against the tenant's technical and business requirements.",
-          recommendationAvailable: postureActionIdsByValidator.has(validatorId),
-        }))
+      ? posture.projected.openControls.map(
+          ({ validatorId, title, priority, points }) => ({
+            title,
+            importance:
+              priority === "red"
+                ? "High priority"
+                : priority === "yellow"
+                  ? "Moderate priority"
+                  : "Low priority",
+            points,
+            guidance:
+              POSTURE_REVIEW_GUIDANCE[validatorId] ??
+              "Review this control against the tenant's technical and business requirements.",
+            recommendationAvailable: actionIdsByValidator.has(validatorId),
+          }),
+        )
       : [];
     const publicPosture = posture
       ? {
           modelVersion: posture.modelVersion,
-          evidenceBasis: posture.evidenceBasis,
           current: {
             score: posture.current.score,
             rating: posture.current.rating,
-            openFoundationalControlCount:
-              posture.current.openFoundationalControls.length,
-            openHighControlCount: posture.current.openHighControls.length,
+            openControlCount: posture.current.openControls.length,
           },
           projected: {
             score: posture.projected.score,
             rating: posture.projected.rating,
-            openFoundationalControlCount:
-              posture.projected.openFoundationalControls.length,
-            openHighControlCount: posture.projected.openHighControls.length,
+            openControlCount: posture.projected.openControls.length,
             ...(triaged ? { openControls: projectedOpenControls } : {}),
           },
           delta: posture.delta,
           catalogControlCount: posture.catalogControlCount,
-          reportedControlCount: posture.reportedControlCount,
+          passedControlCount: posture.passedControlCount,
           unscoredValidatorCount: posture.unscoredValidatorIds.length,
         }
       : undefined;
@@ -681,23 +884,34 @@ export async function startUiServer(
             },
           }
         : {}),
-      ...(outputPath ? { outputFile: path.basename(outputPath) } : {}),
       submissionReady: allDecisionsSaved(),
       submitted: Boolean(submittedPackage),
       canExecute:
         Boolean(submittedPackage?.dev.plan.calls.length) &&
         submittedPackage?.dev.apiValidation.valid === true &&
         submittedPackage?.dev.terraformValidation.valid === true &&
-        execution?.status !== "succeeded",
+        !(
+          execution?.operation === "apply" && execution.status === "succeeded"
+        ) &&
+        execution?.operation !== "rollback",
+      canRollback: rollbackAvailable(),
       executing,
       ...(submittedPackage
         ? {
             changePackage: {
               directory: path.basename(submittedPackage.paths.directory),
               dev: {
+                tenantDomain: redactText(
+                  submittedPackage.dev.tenantDomain,
+                  sensitiveValues,
+                ),
                 apiFile: path.relative(
                   submittedPackage.paths.directory,
                   submittedPackage.paths.dev.apiPlan,
+                ),
+                shellFile: path.relative(
+                  submittedPackage.paths.directory,
+                  submittedPackage.paths.dev.shell,
                 ),
                 terraformFile: path.relative(
                   submittedPackage.paths.directory,
@@ -707,11 +921,20 @@ export async function startUiServer(
                 apiPlanSha256: submittedPackage.dev.apiPlanSha256,
                 apiValidation: submittedPackage.dev.apiValidation,
                 terraformValidation: submittedPackage.dev.terraformValidation,
+                terraformCoverage: submittedPackage.dev.terraformCoverage,
               },
               prod: {
+                tenantDomain: redactText(
+                  submittedPackage.prod.tenantDomain,
+                  sensitiveValues,
+                ),
                 apiFile: path.relative(
                   submittedPackage.paths.directory,
                   submittedPackage.paths.prod.apiPlan,
+                ),
+                shellFile: path.relative(
+                  submittedPackage.paths.directory,
+                  submittedPackage.paths.prod.shell,
                 ),
                 terraformFile: path.relative(
                   submittedPackage.paths.directory,
@@ -721,15 +944,23 @@ export async function startUiServer(
                 apiPlanSha256: submittedPackage.prod.apiPlanSha256,
                 apiValidation: submittedPackage.prod.apiValidation,
                 terraformValidation: submittedPackage.prod.terraformValidation,
+                terraformCoverage: submittedPackage.prod.terraformCoverage,
+                credentialAccess: {
+                  status: submittedPackage.prodCredentialAccess.status,
+                  message:
+                    submittedPackage.prodCredentialAccess.status ===
+                    "write_access_detected"
+                      ? "Production credentials have Management API write access. Package creation continued, but these credentials should be replaced with a read-only client grant."
+                      : submittedPackage.prodCredentialAccess.message,
+                },
               },
             },
           }
         : {}),
       ...(execution ? { execution } : {}),
       triaged,
-      findingStatus: options.status,
       reportValidatorCount,
-      reportFindingCount: cachedFindings.length,
+      reportFindingCount: report?.findings.length ?? 0,
       ...(publicPosture ? { posture: publicPosture } : {}),
       progress: {
         completed: recommendations.filter((recommendation) =>
@@ -744,6 +975,11 @@ export async function startUiServer(
       findings: recommendations.map((recommendation) => {
         const { analysis } = recommendation;
         const finding = recommendation.actions[0]!.finding;
+        const impact = postureRecommendationImpact(
+          finding.validatorId,
+          finding.priority,
+          finding.severity,
+        );
         const saved = recommendation.actions.flatMap((action) => {
           const entry = session?.decisions.find(
             (decision) => decision.actionableChangeId === action.actionId,
@@ -770,15 +1006,21 @@ export async function startUiServer(
           key: recommendation.key,
           title: redactText(recommendation.title, sensitiveValues),
           validatorTitle: redactText(finding.title, sensitiveValues),
-          status: finding.status,
+          impact: impact.label,
+          points: impact.points,
           ...(finding.severity
             ? { severity: redactText(finding.severity, sensitiveValues) }
             : {}),
           analysis,
           selectionMode: recommendation.selectionMode,
+          defaultSelected: recommendation.defaultSelected,
           actionableChanges: recommendation.actions.map((action) => ({
             actionId: action.actionId,
             ...action.actionableChange,
+            ...(action.optionLabel ? { optionLabel: action.optionLabel } : {}),
+            ...(action.optionDescription
+              ? { optionDescription: action.optionDescription }
+              : {}),
           })),
           reviewed,
           selectedActionIds,
@@ -861,7 +1103,9 @@ export async function startUiServer(
         const artifactPath =
           parsed.artifact === "api"
             ? environment.apiPlan
-            : environment.terraform;
+            : parsed.artifact === "shell"
+              ? environment.shell
+              : environment.terraform;
         const filename = `${parsed.profile}-${path.basename(artifactPath)}`;
         const content = await readFile(artifactPath);
         securityHeaders(response);
@@ -869,7 +1113,9 @@ export async function startUiServer(
           "Content-Type",
           parsed.artifact === "api"
             ? "application/yaml; charset=utf-8"
-            : "text/plain; charset=utf-8",
+            : parsed.artifact === "shell"
+              ? "text/x-shellscript; charset=utf-8"
+              : "text/plain; charset=utf-8",
         );
         if (parsed.download === "1") {
           response.setHeader(
@@ -944,6 +1190,13 @@ export async function startUiServer(
         if (parsed.status === "approved" && selectedActionIds.size === 0) {
           throw new Error("Select at least one option, or remain unchanged.");
         }
+        if (
+          parsed.status === "approved" &&
+          recommendation.selectionMode === "alternatives" &&
+          selectedActionIds.size !== 1
+        ) {
+          throw new Error("Select exactly one access policy.");
+        }
         const decidedAt = now().toISOString();
         const adminNote = boundedUserText(
           parsed.rationale,
@@ -979,7 +1232,9 @@ export async function startUiServer(
         }
         submittedPackage = undefined;
         execution = undefined;
+        executionHistory = [];
         delete session.execution;
+        delete session.executionHistory;
         await writeReviewSession(outputPath, session);
         sendJson(response, 200, { saved: true, state: state() });
         return;
@@ -998,44 +1253,114 @@ export async function startUiServer(
         const prodConfig = loadCheckmateConfig("prod", env);
         const configurationLoader =
           dependencies.configurationLoader ?? loadActionableConfiguration;
-        const [devConfiguration, prodConfiguration] = await Promise.all([
-          configurationLoader(findings, devConfig, undefined, {
-            includeCompliant: true,
-          }),
-          configurationLoader(findings, prodConfig, undefined, {
-            includeCompliant: true,
-          }),
-        ]);
+        const [devConfiguration, prodConfiguration, prodCredentialAccess] =
+          await Promise.all([
+            configurationLoader(findings, devConfig, undefined, {
+              includeCompliant: true,
+            }),
+            configurationLoader(findings, prodConfig, undefined, {
+              includeCompliant: true,
+            }),
+            inspectProductionCredential(prodConfig),
+          ]);
         const generatedAt = now().toISOString();
-        const devPlan = buildProfileApiPlan(
+        const devDraftPlan = buildProfileApiPlan(
           session,
           devConfiguration,
           "dev",
           generatedAt,
         );
-        const prodPlan = buildProfileApiPlan(
+        const prodDraftPlan = buildProfileApiPlan(
           session,
           prodConfiguration,
           "prod",
           generatedAt,
         );
+        const devTerraformCoverage = terraformCoverage(devDraftPlan);
+        const prodTerraformCoverage = terraformCoverage(prodDraftPlan);
+        const unsupportedTerraformCalls = [
+          ...devTerraformCoverage.apiOnlyCalls.map((call) => ({
+            profile: "dev",
+            ...call,
+          })),
+          ...prodTerraformCoverage.apiOnlyCalls.map((call) => ({
+            profile: "prod",
+            ...call,
+          })),
+        ];
+        if (unsupportedTerraformCalls.length > 0) {
+          const detail = unsupportedTerraformCalls
+            .map(
+              ({ profile: callProfile, resourceName }) =>
+                `${callProfile}: ${resourceName}`,
+            )
+            .join(", ");
+          throw new Error(
+            `The dual-format change package cannot be created because these accepted changes do not have a safe official Auth0 Terraform mapping: ${detail}. Leave them unchanged and handle them through the documented manual change process.`,
+          );
+        }
+        const [devDraftValidation, prodDraftValidation] = await Promise.all([
+          runApiValidation(devDraftPlan, devConfig),
+          runApiValidation(prodDraftPlan, prodConfig, "read_only"),
+        ]);
+        if (!devDraftValidation.valid || !prodDraftValidation.valid) {
+          const failures = [
+            ...(devDraftValidation.valid
+              ? []
+              : [
+                  `dev: ${devDraftValidation.error ?? "API validation failed"}`,
+                ]),
+            ...(prodDraftValidation.valid
+              ? []
+              : [
+                  `prod: ${prodDraftValidation.error ?? "API validation failed"}`,
+                ]),
+          ];
+          throw new Error(
+            `The API change package was not created because live preflight validation failed (${failures.join("; ")}).`,
+          );
+        }
+        const devPlan = finalizeValidatedApiPlan(
+          devDraftPlan,
+          devDraftValidation,
+          devConfig.domain,
+        );
+        const prodPlan = finalizeValidatedApiPlan(
+          prodDraftPlan,
+          prodDraftValidation,
+          prodConfig.domain,
+        );
+        assertValidatedApiPlan(devPlan);
+        assertValidatedApiPlan(prodPlan);
         const paths = createChangePackagePaths(outputPath);
         await Promise.all([
           writeApiPlan(paths.dev.apiPlan, devPlan),
           writeApiPlan(paths.prod.apiPlan, prodPlan),
           writeTextArtifact(
+            paths.dev.shell,
+            buildApiPlanShellScript(devPlan),
+            0o700,
+          ),
+          writeTextArtifact(
+            paths.prod.shell,
+            buildApiPlanShellScript(prodPlan),
+            0o700,
+          ),
+          writeTextArtifact(
             paths.dev.terraform,
-            buildTerraformReviewConfiguration(devPlan),
+            buildTerraformDeploymentConfiguration(devPlan),
           ),
           writeTextArtifact(
             paths.prod.terraform,
-            buildTerraformReviewConfiguration(prodPlan),
+            buildTerraformDeploymentConfiguration(prodPlan),
           ),
         ]);
         const [devArtifact, prodArtifact] = await Promise.all([
           readApiPlan(paths.dev.apiPlan),
           readApiPlan(paths.prod.apiPlan),
         ]);
+        assertValidatedApiPlan(devArtifact.plan);
+        assertValidatedApiPlan(prodArtifact.plan);
         const [
           devApiValidation,
           prodApiValidation,
@@ -1043,27 +1368,57 @@ export async function startUiServer(
           prodTerraformValidation,
         ] = await Promise.all([
           runApiValidation(devArtifact.plan, devConfig),
-          runApiValidation(prodArtifact.plan, prodConfig),
-          runTerraformValidation(paths.dev.terraform),
-          runTerraformValidation(paths.prod.terraform),
+          runApiValidation(prodArtifact.plan, prodConfig, "read_only"),
+          runTerraformValidation(paths.dev.terraform, devConfig),
+          runTerraformValidation(paths.prod.terraform, prodConfig),
         ]);
+        const invalidArtifacts = [
+          ...(!devApiValidation.valid
+            ? [`dev API: ${devApiValidation.error ?? "validation failed"}`]
+            : []),
+          ...(!prodApiValidation.valid
+            ? [`prod API: ${prodApiValidation.error ?? "validation failed"}`]
+            : []),
+          ...(!devTerraformValidation.valid
+            ? [
+                `dev Terraform: ${devTerraformValidation.error ?? "validation failed"}`,
+              ]
+            : []),
+          ...(!prodTerraformValidation.valid
+            ? [
+                `prod Terraform: ${prodTerraformValidation.error ?? "validation failed"}`,
+              ]
+            : []),
+        ];
+        if (invalidArtifacts.length > 0) {
+          throw new Error(
+            `The change package was not released because validation failed (${invalidArtifacts.join("; ")}).`,
+          );
+        }
         submittedPackage = {
           paths,
           dev: {
+            tenantDomain: devConfig.domain,
             plan: devArtifact.plan,
             apiPlanSha256: devArtifact.sha256,
             apiValidation: devApiValidation,
             terraformValidation: devTerraformValidation,
+            terraformCoverage: devTerraformCoverage,
           },
           prod: {
+            tenantDomain: prodConfig.domain,
             plan: prodArtifact.plan,
             apiPlanSha256: prodArtifact.sha256,
             apiValidation: prodApiValidation,
             terraformValidation: prodTerraformValidation,
+            terraformCoverage: prodTerraformCoverage,
           },
+          prodCredentialAccess,
         };
         execution = undefined;
+        executionHistory = [];
         delete session.execution;
+        delete session.executionHistory;
         sendJson(response, 200, { created: true, state: state() });
         return;
       }
@@ -1080,13 +1435,22 @@ export async function startUiServer(
         if (executing) {
           throw new Error("This API plan is already being executed.");
         }
-        if (execution?.status === "succeeded") {
+        if (
+          execution?.operation === "apply" &&
+          execution.status === "succeeded"
+        ) {
           throw new Error("This API plan has already been executed.");
+        }
+        if (execution?.operation === "rollback") {
+          throw new Error(
+            "Create a new change package after a rollback before applying changes again.",
+          );
         }
         const devConfig = loadCheckmateConfig("dev", env);
         const devArtifact = await readApiPlan(
           submittedPackage.paths.dev.apiPlan,
         );
+        assertValidatedApiPlan(devArtifact.plan);
         if (devArtifact.sha256 !== submittedPackage.dev.apiPlanSha256) {
           throw new Error(
             "Execution stopped because dev/api-plan.yml changed after review. Submit the decisions again to create and validate a new plan.",
@@ -1094,7 +1458,10 @@ export async function startUiServer(
         }
         const [apiValidation, terraformValidation] = await Promise.all([
           runApiValidation(devArtifact.plan, devConfig),
-          runTerraformValidation(submittedPackage.paths.dev.terraform),
+          runTerraformValidation(
+            submittedPackage.paths.dev.terraform,
+            devConfig,
+          ),
         ]);
         submittedPackage.dev.apiValidation = apiValidation;
         submittedPackage.dev.terraformValidation = terraformValidation;
@@ -1108,11 +1475,18 @@ export async function startUiServer(
             execution = await (dependencies.planExecutor ?? executeApiPlan)(
               devArtifact.plan,
               devConfig,
-              { now },
+              {
+                now,
+                ...(execution?.operation === "apply" &&
+                execution.status === "failed"
+                  ? { previousExecution: execution }
+                  : {}),
+              },
             );
           } catch (error) {
             const timestamp = now().toISOString();
             execution = {
+              operation: "apply",
               status: "failed",
               startedAt: timestamp,
               completedAt: timestamp,
@@ -1124,18 +1498,99 @@ export async function startUiServer(
         } finally {
           executing = false;
         }
-        session.execution = {
+        const completedExecution = execution;
+        if (!completedExecution) {
+          throw new Error("The dev execution returned no result.");
+        }
+        executionHistory.push(completedExecution);
+        const executionRecord = {
           planFile: path.relative(
             submittedPackage.paths.directory,
             submittedPackage.paths.dev.apiPlan,
           ),
           planSha256: devArtifact.sha256,
-          ...execution,
+          ...completedExecution,
         };
-        session.review.lastUpdatedAt = execution.completedAt;
+        session.execution = executionRecord;
+        session.executionHistory = [
+          ...(session.executionHistory ?? []),
+          executionRecord,
+        ];
+        session.review.lastUpdatedAt = completedExecution.completedAt;
         await writeReviewSession(outputPath, session);
         sendJson(response, 200, {
-          executed: execution.status === "succeeded",
+          executed: completedExecution.status === "succeeded",
+          state: state(),
+        });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/rollback") {
+        if (!session || !outputPath) {
+          throw new Error("Run a CheckMate scan or load a report first.");
+        }
+        rollbackRequestSchema.parse(await readBody(request));
+        if (!submittedPackage) {
+          throw new Error(
+            "Submit and review the change package before rolling it back.",
+          );
+        }
+        if (executing) {
+          throw new Error("Wait for the current dev operation to finish.");
+        }
+        const appliedExecution = lastApplyExecution();
+        if (!appliedExecution || !rollbackAvailable()) {
+          throw new Error("No applied dev changes are available to roll back.");
+        }
+        const devArtifact = await readApiPlan(
+          submittedPackage.paths.dev.apiPlan,
+        );
+        assertValidatedApiPlan(devArtifact.plan);
+        if (devArtifact.sha256 !== submittedPackage.dev.apiPlanSha256) {
+          throw new Error(
+            "Rollback stopped because dev/api-plan.yml changed after execution.",
+          );
+        }
+        const devConfig = loadCheckmateConfig("dev", env);
+        executing = true;
+        try {
+          try {
+            execution = await (
+              dependencies.planRollbackExecutor ?? rollbackApiPlan
+            )(devArtifact.plan, devConfig, appliedExecution, { now });
+          } catch (error) {
+            const timestamp = now().toISOString();
+            execution = {
+              operation: "rollback",
+              status: "failed",
+              startedAt: timestamp,
+              completedAt: timestamp,
+              profile: "dev",
+              calls: [],
+              error: redactText(toErrorMessage(error), sensitiveValues),
+            };
+          }
+        } finally {
+          executing = false;
+        }
+        const completedRollback = execution;
+        executionHistory.push(completedRollback);
+        const rollbackRecord = {
+          planFile: path.relative(
+            submittedPackage.paths.directory,
+            submittedPackage.paths.dev.apiPlan,
+          ),
+          planSha256: devArtifact.sha256,
+          ...completedRollback,
+        };
+        session.execution = rollbackRecord;
+        session.executionHistory = [
+          ...(session.executionHistory ?? []),
+          rollbackRecord,
+        ];
+        session.review.lastUpdatedAt = completedRollback.completedAt;
+        await writeReviewSession(outputPath, session);
+        sendJson(response, 200, {
+          rolledBack: completedRollback.status === "succeeded",
           state: state(),
         });
         return;

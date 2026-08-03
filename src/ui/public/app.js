@@ -11,13 +11,7 @@ const node = (tag, className, text) => {
 function findingScope() {
   const validators = ui.state.reportValidatorCount;
   const details = ui.state.reportFindingCount;
-  if (ui.state.findingStatus === "failed") {
-    return `${validators} failed validator${validators === 1 ? "" : "s"} with ${details} failed detail item${details === 1 ? "" : "s"}`;
-  }
-  if (ui.state.findingStatus === "warning") {
-    return `${validators} warning validator${validators === 1 ? "" : "s"} with ${details} warning detail item${details === 1 ? "" : "s"}`;
-  }
-  return `${validators} validators with ${details} reported detail item${details === 1 ? "" : "s"}`;
+  return `${validators} reported validator${validators === 1 ? "" : "s"} with ${details} detail item${details === 1 ? "" : "s"}`;
 }
 
 async function api(path, options = {}) {
@@ -61,6 +55,7 @@ function renderProgress() {
 function renderScanLoading(profile) {
   ui.state.scanning = true;
   renderProgress();
+  byId("workspace").classList.remove("review-workspace");
   const page = node("section", "triage-page");
   page.append(
     node("div", "spinner", ""),
@@ -76,6 +71,7 @@ function renderScanLoading(profile) {
 
 function renderStartPage() {
   renderProgress();
+  byId("workspace").classList.remove("review-workspace");
   const page = node("section", "scan-start-page");
   const content = node("div", "scan-start-content");
   content.append(
@@ -87,6 +83,34 @@ function renderStartPage() {
       "CheckMate reads the Auth0 tenant configuration and creates a JSON security report. AI guidance starts after the report is ready.",
     ),
   );
+  const prerequisite = node("section", "scan-prerequisite");
+  prerequisite.append(
+    node("div", "scan-prerequisite-label", "Assessment prerequisite"),
+    node("h2", "", "Development must mirror production configuration"),
+    node(
+      "p",
+      "",
+      "Before starting, the development tenant must have exactly the same security-relevant Auth0 configuration as the production tenant. This makes the assessment and proposed changes representative of production.",
+    ),
+    node(
+      "p",
+      "scan-prerequisite-detail",
+      "Keep environment-specific tenant domains, resource IDs, credentials, users, logs, and customer data separate.",
+    ),
+  );
+  const confirmationLabel = node("label", "scan-prerequisite-confirmation");
+  const confirmation = document.createElement("input");
+  confirmation.type = "checkbox";
+  confirmationLabel.append(
+    confirmation,
+    node(
+      "span",
+      "",
+      "I confirm the development tenant mirrors the production configuration baseline.",
+    ),
+  );
+  prerequisite.append(confirmationLabel);
+  content.append(prerequisite);
   const form = node("div", "scan-form");
   const label = node("label", "scan-profile-label", "Tenant profile");
   const select = document.createElement("select");
@@ -107,7 +131,10 @@ function renderStartPage() {
   label.append(select);
   const run = node("button", "scan-button", "Run CheckMate scan");
   run.type = "button";
-  run.disabled = available.length === 0;
+  run.disabled = true;
+  confirmation.addEventListener("change", () => {
+    run.disabled = available.length === 0 || !confirmation.checked;
+  });
   run.addEventListener("click", async () => {
     const profile = select.value;
     renderScanLoading(profile);
@@ -272,9 +299,13 @@ function executionSummary(parent) {
     node(
       "h3",
       "",
-      ui.state.execution.status === "succeeded"
-        ? "Execution completed"
-        : "Execution stopped",
+      ui.state.execution.operation === "rollback"
+        ? ui.state.execution.status === "succeeded"
+          ? "Rollback completed"
+          : "Rollback stopped"
+        : ui.state.execution.status === "succeeded"
+          ? "Execution completed"
+          : "Execution stopped",
     ),
   );
   if (ui.state.execution.error) {
@@ -314,7 +345,7 @@ function openPlanReview() {
     node(
       "p",
       "",
-      "Terraform was validated and the Management API preflight passed separately for development and production.",
+      "Each accepted change has an official-provider Terraform implementation and a live-preflighted Management API PATCH plan for development and production.",
     ),
   );
   heading.querySelector("h2").id = "plan-modal-title";
@@ -324,6 +355,30 @@ function openPlanReview() {
   close.addEventListener("click", closePlanReview);
   header.append(heading, close);
   modal.append(header);
+
+  if (changePackage.dev.tenantDomain === changePackage.prod.tenantDomain) {
+    modal.append(
+      node(
+        "p",
+        "validation-error environment-isolation-warning",
+        `Development and production currently point to the same tenant (${changePackage.dev.tenantDomain}). Configure a separate production profile before promotion.`,
+      ),
+    );
+  }
+  const credentialAccess = changePackage.prod.credentialAccess;
+  if (credentialAccess?.status === "write_access_detected") {
+    modal.append(
+      node(
+        "p",
+        "validation-error credential-access-alert",
+        credentialAccess.message,
+      ),
+    );
+  } else if (credentialAccess?.status === "unverified") {
+    modal.append(
+      node("p", "credential-access-unverified", credentialAccess.message),
+    );
+  }
 
   const environments = node("div", "plan-calls environment-plans");
   for (const profile of ["dev", "prod"]) {
@@ -338,18 +393,19 @@ function openPlanReview() {
         "",
         profile === "dev" ? "Development tenant" : "Production tenant",
       ),
+      node("p", "", artifact.tenantDomain),
     );
     const validations = node("div", "validation-badges");
     validations.append(
       node(
         "span",
         `validation-badge ${artifact.terraformValidation.valid ? "valid" : "invalid"}`,
-        `Terraform ${artifact.terraformValidation.valid ? "validated" : "invalid"}`,
+        `Terraform ${artifact.terraformValidation.valid ? "plan validated" : "invalid"}`,
       ),
       node(
         "span",
         `validation-badge ${artifact.apiValidation.valid ? "valid" : "invalid"}`,
-        `API preflight ${artifact.apiValidation.valid ? "passed" : "failed"}`,
+        `${profile === "prod" ? "Read-only API preflight" : "API preflight"} ${artifact.apiValidation.valid ? "passed" : "failed"}`,
       ),
     );
     environmentHeader.append(title, validations);
@@ -358,6 +414,7 @@ function openPlanReview() {
     for (const [kind, filename] of [
       ["terraform", artifact.terraformFile],
       ["api", artifact.apiFile],
+      ["shell", artifact.shellFile],
     ]) {
       const row = node("div", "artifact-file");
       const view = node("button", "artifact-view-button", "View");
@@ -389,6 +446,20 @@ function openPlanReview() {
           `Terraform: ${artifact.terraformValidation.error}`,
         ),
       );
+    }
+    if (artifact.terraformCoverage.apiOnlyCalls.length) {
+      const apiOnly = node("div", "validation-error");
+      apiOnly.append(
+        node(
+          "p",
+          "",
+          `${artifact.terraformCoverage.managedCallIds.length} of ${artifact.plan.calls.length} API calls have an official Terraform deployment mapping.`,
+        ),
+      );
+      for (const call of artifact.terraformCoverage.apiOnlyCalls) {
+        apiOnly.append(node("p", "", `${call.resourceName}: ${call.reason}`));
+      }
+      section.append(apiOnly);
     }
     if (artifact.apiValidation.error) {
       section.append(
@@ -469,9 +540,23 @@ function openPlanReview() {
     checkbox.type = "checkbox";
     confirmation.append(
       checkbox,
-      node("span", "", "I understand this will change the dev tenant."),
+      node(
+        "span",
+        "",
+        ui.state.execution?.operation === "apply" &&
+          ui.state.execution.status === "failed"
+          ? "I reviewed the completed calls and want to resume the remaining dev changes."
+          : "I understand this will change the dev tenant.",
+      ),
     );
-    const execute = node("button", "execute-button", "Execute changes");
+    const resume =
+      ui.state.execution?.operation === "apply" &&
+      ui.state.execution.status === "failed";
+    const execute = node(
+      "button",
+      "execute-button",
+      resume ? "Resume changes" : "Execute changes",
+    );
     execute.type = "button";
     execute.disabled = true;
     checkbox.addEventListener("change", () => {
@@ -491,22 +576,25 @@ function openPlanReview() {
         openPlanReview();
         toast(
           result.executed
-            ? "Auth0 changes executed and verified."
-            : "Execution stopped. Review the result.",
+            ? resume
+              ? "Remaining Auth0 changes executed and verified."
+              : "Auth0 changes executed and verified."
+            : "Execution stopped. You can resume or roll back applied changes.",
           !result.executed,
         );
       } catch (error) {
         if (error.responseBody?.state) ui.state = error.responseBody.state;
         checkbox.disabled = false;
         execute.disabled = !checkbox.checked;
-        execute.textContent = "Execute changes";
+        execute.textContent = resume ? "Resume changes" : "Execute changes";
         toast(error.message, true);
       }
     });
     footer.append(confirmation, execute);
   } else if (
     changePackage.dev.plan.calls.length &&
-    ui.state.execution?.status !== "succeeded"
+    (!changePackage.dev.apiValidation.valid ||
+      !changePackage.dev.terraformValidation.valid)
   ) {
     footer.append(
       node(
@@ -515,6 +603,56 @@ function openPlanReview() {
         "Dev execution is blocked until Terraform validation and the API preflight pass.",
       ),
     );
+  }
+  if (ui.state.canRollback) {
+    const rollbackConfirmation = node("label", "execute-confirmation");
+    const rollbackCheckbox = document.createElement("input");
+    rollbackCheckbox.type = "checkbox";
+    rollbackConfirmation.append(
+      rollbackCheckbox,
+      node(
+        "span",
+        "",
+        "I reviewed the execution result and want to restore the applied dev settings.",
+      ),
+    );
+    const rollback = node(
+      "button",
+      "rollback-button",
+      "Roll back applied changes",
+    );
+    rollback.type = "button";
+    rollback.disabled = true;
+    rollbackCheckbox.addEventListener("change", () => {
+      rollback.disabled = !rollbackCheckbox.checked;
+    });
+    rollback.addEventListener("click", async () => {
+      rollbackCheckbox.disabled = true;
+      rollback.disabled = true;
+      rollback.textContent = "Rolling back…";
+      try {
+        const result = await api("/api/rollback", {
+          method: "POST",
+          body: JSON.stringify({ confirmed: true }),
+        });
+        ui.state = result.state;
+        renderSubmission();
+        openPlanReview();
+        toast(
+          result.rolledBack
+            ? "Applied dev changes were rolled back and verified."
+            : "Rollback stopped. Review the result and retry safely.",
+          !result.rolledBack,
+        );
+      } catch (error) {
+        if (error.responseBody?.state) ui.state = error.responseBody.state;
+        rollbackCheckbox.disabled = false;
+        rollback.disabled = !rollbackCheckbox.checked;
+        rollback.textContent = "Roll back applied changes";
+        toast(error.message, true);
+      }
+    });
+    footer.append(rollbackConfirmation, rollback);
   }
   modal.append(footer);
   overlay.append(modal);
@@ -537,9 +675,13 @@ function renderDecisionOptions(finding, adminNotes, selectionCheckboxes = []) {
       ? "✓ Selection saved"
       : finding.selectionMode === "applications"
         ? "Accept for selected applications"
-        : finding.selectionMode === "changes"
-          ? "Accept selected removals"
-          : "Accept AI suggestion",
+        : finding.selectionMode === "connections"
+          ? "Accept for selected connections"
+          : finding.selectionMode === "alternatives"
+            ? "Accept selected policy"
+            : finding.selectionMode === "changes"
+              ? "Accept selected removals"
+              : "Accept AI suggestion",
   );
   const unchanged = node(
     "button",
@@ -559,7 +701,11 @@ function renderDecisionOptions(finding, adminNotes, selectionCheckboxes = []) {
       toast(
         finding.selectionMode === "applications"
           ? "Select at least one application, or remain unchanged."
-          : "Select at least one callback URL, or remain unchanged.",
+          : finding.selectionMode === "connections"
+            ? "Select at least one connection, or remain unchanged."
+            : finding.selectionMode === "alternatives"
+              ? "Select an access policy, or remain unchanged."
+              : "Select at least one callback URL, or remain unchanged.",
         true,
       );
       return;
@@ -601,6 +747,15 @@ function createFindingCard(finding, index) {
       ),
     );
   }
+  if (finding.points) {
+    top.append(
+      node(
+        "span",
+        "recommendation-points",
+        `+${finding.points} ${finding.points === 1 ? "point" : "points"}`,
+      ),
+    );
+  }
   if (finding.reviewed) top.append(node("span", "saved", "Decision saved"));
   card.append(top, node("h2", "validator-title", displayTitle));
   if (finding.validatorTitle && finding.validatorTitle !== displayTitle) {
@@ -625,6 +780,8 @@ function createFindingCard(finding, index) {
   const selectionCheckboxes = [];
   if (
     finding.selectionMode === "applications" ||
+    finding.selectionMode === "connections" ||
+    finding.selectionMode === "alternatives" ||
     finding.selectionMode === "changes"
   ) {
     const applications = node("fieldset", "application-selection");
@@ -637,15 +794,23 @@ function createFindingCard(finding, index) {
         "",
         finding.selectionMode === "applications"
           ? "Select applications"
-          : "Select callback URLs",
+          : finding.selectionMode === "connections"
+            ? "Select connections"
+            : finding.selectionMode === "alternatives"
+              ? "Select user access policy"
+              : "Select callback URLs",
       ),
     );
     const selected = new Set(finding.selectedActionIds || []);
     const selectableChanges = [...finding.actionableChanges].sort(
       (left, right) => {
-        if (finding.selectionMode === "applications") {
+        if (
+          finding.selectionMode === "applications" ||
+          finding.selectionMode === "connections"
+        ) {
           return left.resourceName.localeCompare(right.resourceName);
         }
+        if (finding.selectionMode === "alternatives") return 0;
         return removedCallbackUrl(left).localeCompare(
           removedCallbackUrl(right),
         );
@@ -654,14 +819,25 @@ function createFindingCard(finding, index) {
     for (const change of selectableChanges) {
       const label = node("label", "application-option");
       const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
+      checkbox.type =
+        finding.selectionMode === "alternatives" ? "radio" : "checkbox";
+      if (finding.selectionMode === "alternatives") {
+        checkbox.name = `policy-${finding.key}`;
+      }
       checkbox.value = change.actionId;
       checkbox.checked = finding.reviewed
         ? selected.has(change.actionId)
-        : true;
+        : finding.selectionMode === "alternatives"
+          ? change === selectableChanges[0]
+          : finding.defaultSelected !== false;
       selectionCheckboxes.push(checkbox);
       const text = node("span", "application-option-text");
-      if (finding.selectionMode === "changes") {
+      if (finding.selectionMode === "alternatives") {
+        text.append(
+          node("strong", "", change.optionLabel),
+          node("small", "", change.optionDescription),
+        );
+      } else if (finding.selectionMode === "changes") {
         const callbackUrl = removedCallbackUrl(change);
         text.append(
           node("strong", "", callbackLabel(callbackUrl)),
@@ -681,6 +857,15 @@ function createFindingCard(finding, index) {
       applications.append(label);
     }
     suggestion.append(applications);
+    if (!finding.reviewed && finding.defaultSelected === false) {
+      suggestion.append(
+        node(
+          "p",
+          "compatibility-selection-note",
+          "Nothing is selected by default. Confirm application compatibility and choose the affected resources before accepting this suggestion.",
+        ),
+      );
+    }
   } else {
     const exact = node("div", "exact-changes");
     exact.append(node("strong", "", "Exact configuration changes"));
@@ -765,7 +950,7 @@ function renderSubmission() {
         "",
         ui.state.execution?.status === "succeeded"
           ? "The accepted Auth0 changes were applied and verified against the dev tenant."
-          : "Terraform and API outputs were generated for development and production. Review their validation results before dev execution.",
+          : "Executable Terraform and drift-bound API outputs passed validation for development and production. Review them before dev execution.",
       ),
       node("code", "yaml-file", ui.state.changePackage.directory),
     );
@@ -786,7 +971,7 @@ function renderSubmission() {
     node(
       "p",
       "",
-      "Submit your decisions to generate Terraform and preflight-checked API plans for development and production.",
+      "Submit your decisions to generate official-provider Terraform and live-preflighted API plans for development and production. The package is released only when both formats pass validation.",
     ),
   );
   const submit = node("button", "submit-button", "Submit");
@@ -814,6 +999,7 @@ function renderSubmission() {
 
 function renderTriageLoading() {
   renderProgress();
+  byId("workspace").classList.remove("review-workspace");
   const page = node("section", "triage-page");
   page.append(
     node("div", "spinner", ""),
@@ -831,24 +1017,10 @@ function postureRatingLabel(rating) {
   return `${rating.charAt(0).toUpperCase()}${rating.slice(1)}`;
 }
 
-function createPosturePanel() {
+function createPostureScores(className = "posture-scores") {
   const posture = ui.state.posture;
-  const panel = node("section", "posture-panel");
-  panel.id = "posture";
-  if (!posture) return panel;
-
-  const heading = node("div", "posture-heading");
-  heading.append(
-    node("div", "eyebrow", "Weighted security measurement"),
-    node("h2", "", "Auth0 tenant configuration posture"),
-    node(
-      "p",
-      "",
-      "Current posture comes from the latest CheckMate report. Projected posture shows the effect of accepted suggestions before any tenant change is made.",
-    ),
-  );
-
-  const scores = node("div", "posture-scores");
+  const scores = node("div", className);
+  if (!posture) return scores;
   const scoreCard = (label, snapshot, detail) => {
     const card = node("article", `posture-score ${snapshot.rating}`);
     const top = node("div", "posture-score-top");
@@ -878,43 +1050,72 @@ function createPosturePanel() {
         : "No score movement selected yet",
     ),
   );
+  return scores;
+}
 
-  const foundationalRemaining =
-    posture.projected.openFoundationalControlCount || 0;
-  const highRemaining = posture.projected.openHighControlCount || 0;
-  const remaining = foundationalRemaining + highRemaining;
+function createPosturePanel() {
+  const posture = ui.state.posture;
+  const panel = node("section", "posture-panel");
+  panel.id = "posture";
+  if (!posture) return panel;
+
+  const heading = node("div", "posture-heading");
+  heading.append(
+    node("div", "eyebrow", "Weighted security measurement"),
+    node("h2", "", "Auth0 tenant configuration posture"),
+    node(
+      "p",
+      "",
+      "Current posture comes from the latest CheckMate report. Projected posture shows the effect of accepted suggestions before any tenant change is made.",
+    ),
+  );
+
+  const scores = createPostureScores();
+
+  const remaining = posture.projected.openControlCount || 0;
   const foot = node("div", "posture-foot");
   foot.append(
     node(
       "p",
       "",
-      `Model ${posture.modelVersion}. ${posture.catalogControlCount} baseline controls are weighted by security importance; report rows are not counted equally.`,
+      `Model ${posture.modelVersion}. ${posture.passedControlCount} of ${posture.catalogControlCount} scorable CheckMate validators passed. Red validators earn 5 points, yellow earn 3, and green earn 1.`,
     ),
     node(
       "p",
       "",
-      `${posture.unscoredValidatorCount} capability-dependent or informational report validators are excluded from posture points. Optional controls such as DPoP do not reduce the score.`,
+      `${posture.unscoredValidatorCount} blue informational or violet GenAI report validators are excluded from posture points.`,
     ),
     node(
       "p",
       "",
       remaining
-        ? `${foundationalRemaining} foundational and ${highRemaining} high-impact controls remain as additional hardening opportunities. They do not override the points-based colour.`
-        : "No foundational or high-impact baseline controls remain open.",
+        ? `${remaining} scorable validators remain open after the selected decisions.`
+        : "All scorable CheckMate validators passed or are projected to pass.",
     ),
     node(
       "p",
       "",
-      "Colour thresholds: Red below 50 points, Amber from 50 to 69, and Green from 70.",
+      "Colour thresholds: Red below 60 points, Amber from 60 to 79, and Green from 80.",
     ),
     node(
       "p",
       "posture-caveat",
-      "Selecting a suggestion changes only this projection. Current posture changes only after execution and a new CheckMate scan.",
+      "A validator's points move into the projection only when all supported changes for that validator are accepted.",
     ),
   );
   panel.append(heading, scores, foot);
   return panel;
+}
+
+function createPostureSidebar() {
+  const sidebar = node("aside", "posture-sidebar");
+  sidebar.id = "posture-sidebar";
+  sidebar.setAttribute("aria-label", "Current and projected posture scores");
+  sidebar.append(
+    node("div", "eyebrow", "Posture scores"),
+    createPostureScores("posture-sidebar-scores"),
+  );
+  return sidebar;
 }
 
 function createAdditionalControlsPanel() {
@@ -954,11 +1155,14 @@ function createAdditionalControlsPanel() {
 function renderPosture() {
   const current = byId("posture");
   if (current) current.replaceWith(createPosturePanel());
+  const sidebar = byId("posture-sidebar");
+  if (sidebar) sidebar.replaceWith(createPostureSidebar());
 }
 
 function renderPage() {
   renderProgress();
   const workspace = byId("workspace");
+  workspace.classList.add("review-workspace");
   workspace.replaceChildren();
   ui.cards.clear();
   const intro = node("section", "page-intro");
@@ -995,10 +1199,13 @@ function renderPage() {
   }
   const submission = node("section", "submission-panel");
   submission.id = "submission";
-  workspace.append(intro, createPosturePanel());
-  workspace.append(list, submission);
+  const main = node("div", "review-main");
+  main.append(intro, createPosturePanel(), list, submission);
   const additionalControls = createAdditionalControlsPanel();
-  if (additionalControls) workspace.append(additionalControls);
+  if (additionalControls) main.append(additionalControls);
+  const layout = node("div", "review-layout");
+  layout.append(main, createPostureSidebar());
+  workspace.append(layout);
   renderSubmission();
 }
 

@@ -1,5 +1,12 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { loadCheckmateReport } from "../src/checkmate/report-loader.js";
 import type { NormalizedCheckmateFinding } from "../src/findings/types.js";
+import {
+  POSTURE_CONTROLS,
+  POSTURE_MAXIMUM_SCORE,
+  postureRecommendationImpact,
+} from "../src/posture/control-catalog.js";
 import {
   classifyPostureScore,
   evaluatePosture,
@@ -7,91 +14,114 @@ import {
 
 function finding(
   validatorId: string,
-  status: NormalizedCheckmateFinding["status"] = "failed",
+  id = `${validatorId}-1`,
 ): NormalizedCheckmateFinding {
   return {
-    id: `${validatorId}-1`,
+    id,
     validatorId,
     title: validatorId,
-    status,
+    status: "failed",
     raw: {},
   };
 }
 
 describe("tenant configuration posture", () => {
-  it("returns green for a report with no catalog control issues", () => {
+  it("uses all 36 scorable CheckMate 1.8.3 validators", () => {
     const assessment = evaluatePosture([]);
 
-    expect(assessment.modelVersion).toBe("auth0-posture-v1");
-    expect(assessment.current).toMatchObject({ score: 100, rating: "green" });
+    expect(POSTURE_CONTROLS).toHaveLength(36);
+    expect(POSTURE_MAXIMUM_SCORE).toBe(118);
+    expect(assessment).toMatchObject({
+      modelVersion: "checkmate-1.8.3",
+      maximumScore: 118,
+      catalogControlCount: 36,
+      passedControlCount: 36,
+      current: { score: 118, rating: "green" },
+      delta: 0,
+    });
     expect(assessment.projected).toEqual(assessment.current);
-    expect(assessment.delta).toBe(0);
   });
 
-  it("uses posture points for colour while retaining foundational control context", () => {
-    const assessment = evaluatePosture([finding("checkGuardianPolicy")]);
+  it("deducts and restores five points for a red validator", () => {
+    const current = evaluatePosture([finding("checkPasswordPolicy")]);
+    const projected = evaluatePosture([finding("checkPasswordPolicy")], {
+      projectedResolvedValidatorIds: new Set(["checkPasswordPolicy"]),
+    });
 
-    expect(assessment.current.score).toBeGreaterThan(60);
-    expect(assessment.current.rating).toBe("green");
-    expect(assessment.current.openFoundationalControls).toEqual([
-      {
-        validatorId: "checkGuardianPolicy",
-        title: "MFA policy",
-      },
-    ]);
+    expect(current.current.score).toBe(113);
+    expect(projected.current.score).toBe(113);
+    expect(projected.projected.score).toBe(118);
+    expect(projected.delta).toBe(5);
   });
 
-  it("does not override a points-based colour for a high-impact warning", () => {
+  it("deducts three points for yellow and one for green", () => {
     const assessment = evaluatePosture([
-      finding("checkManagementAPIUserAccess", "warning"),
+      finding("checkPasswordComplexity"),
+      finding("checkPasswordHistory"),
     ]);
 
-    expect(assessment.current.score).toBeGreaterThanOrEqual(85);
-    expect(assessment.current.rating).toBe("green");
-    expect(assessment.current.openHighControls).toHaveLength(1);
+    expect(assessment.current.score).toBe(114);
+    expect(assessment.reportedControlCount).toBe(2);
+    expect(assessment.passedControlCount).toBe(34);
   });
 
-  it("raises only the projection when an accepted change resolves a validator", () => {
-    const assessment = evaluatePosture([finding("checkGuardianPolicy")], {
-      projectedResolvedValidatorIds: new Set(["checkGuardianPolicy"]),
+  it("counts a validator once when several detail rows are reported", () => {
+    const assessment = evaluatePosture([
+      finding("checkGrantTypes", "grant-1"),
+      finding("checkGrantTypes", "grant-2"),
+      finding("checkGrantTypes", "grant-3"),
+    ]);
+
+    expect(assessment.current.score).toBe(113);
+    expect(assessment.reportedControlCount).toBe(1);
+  });
+
+  it("assigns fixed recommendation points from CheckMate priority", () => {
+    expect(postureRecommendationImpact("checkPasswordPolicy")).toMatchObject({
+      label: "High priority",
+      points: 5,
     });
-
-    expect(assessment.current.rating).toBe("green");
-    expect(assessment.current.score).toBeLessThan(100);
-    expect(assessment.projected).toMatchObject({ score: 100, rating: "green" });
-    expect(assessment.delta).toBeGreaterThan(0);
-  });
-
-  it("awards partial points when only some actions for a validator are accepted", () => {
-    const assessment = evaluatePosture([finding("checkPasswordPolicy")], {
-      projectedValidatorProgress: new Map([["checkPasswordPolicy", 0.5]]),
+    expect(
+      postureRecommendationImpact("checkPasswordNoPersonalInfo"),
+    ).toMatchObject({ label: "Moderate priority", points: 3 });
+    expect(postureRecommendationImpact("checkPasswordHistory")).toMatchObject({
+      label: "Low priority",
+      points: 1,
     });
-
-    expect(assessment.projected.score).toBeGreaterThan(
-      assessment.current.score,
-    );
-    expect(assessment.projected.score).toBeLessThan(100);
   });
 
-  it("weights a foundational control more heavily than a low-impact control", () => {
-    const foundational = evaluatePosture([finding("checkGuardianPolicy")]);
-    const low = evaluatePosture([finding("checkPasswordHistory")]);
+  it("does not score blue or violet validators", () => {
+    const assessment = evaluatePosture([
+      finding("checkSupportUrl"),
+      finding("checkEnabledDynamicClientRegistration"),
+    ]);
 
-    expect(foundational.current.score).toBeLessThan(low.current.score);
-  });
-
-  it("reports CheckMate validators that are intentionally outside the score", () => {
-    const assessment = evaluatePosture([finding("checkSupportUrl")]);
-
-    expect(assessment.current.score).toBe(100);
+    expect(assessment.current.score).toBe(118);
     expect(assessment.reportedControlCount).toBe(0);
-    expect(assessment.unscoredValidatorIds).toEqual(["checkSupportUrl"]);
+    expect(assessment.unscoredValidatorIds).toEqual([
+      "checkEnabledDynamicClientRegistration",
+      "checkSupportUrl",
+    ]);
   });
 
-  it("classifies 70 posture points as green", () => {
-    expect(classifyPostureScore(49)).toBe("red");
-    expect(classifyPostureScore(50)).toBe("amber");
-    expect(classifyPostureScore(69)).toBe("amber");
-    expect(classifyPostureScore(70)).toBe("green");
+  it("calculates 44 starting points from the latest CheckMate report", async () => {
+    const report = await loadCheckmateReport(
+      path.resolve(
+        "reports/a0-checkmate.au.auth0.com_en_2026-08-03_17_13_09_report.json",
+      ),
+    );
+    const assessment = evaluatePosture(report.findings);
+
+    expect(assessment.current).toMatchObject({ score: 44, rating: "red" });
+    expect(assessment.reportedControlCount).toBe(24);
+    expect(assessment.passedControlCount).toBe(12);
+  });
+
+  it("uses the requested red, amber, and green thresholds", () => {
+    expect(classifyPostureScore(44)).toBe("red");
+    expect(classifyPostureScore(59)).toBe("red");
+    expect(classifyPostureScore(60)).toBe("amber");
+    expect(classifyPostureScore(79)).toBe("amber");
+    expect(classifyPostureScore(80)).toBe("green");
   });
 });

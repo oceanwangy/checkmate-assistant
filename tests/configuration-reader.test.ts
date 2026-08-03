@@ -114,6 +114,27 @@ describe("Auth0 actionable configuration reader", () => {
     expect(tokenBody.scope).toContain("read:connections_options");
   });
 
+  it("does not turn system Management API settings into automatic changes", async () => {
+    const finding: NormalizedCheckmateFinding = {
+      id: "management-api-user-access",
+      validatorId: "checkManagementAPIUserAccess",
+      title: "Management API user access",
+      status: "failed",
+      affectedResource: { name: "Auth0 Management API" },
+      raw: {},
+    };
+    const fetcher = vi.fn<Fetcher>();
+
+    const result = await loadActionableConfiguration(
+      [finding],
+      config,
+      fetcher,
+    );
+
+    expect(result.size).toBe(0);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("does not propose legacy fields for a flexible password policy", async () => {
     const fetcher = vi
       .fn<Fetcher>()
