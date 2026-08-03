@@ -1394,63 +1394,27 @@ export async function startUiServer(
         ]);
         assertValidatedApiPlan(devArtifact.plan);
         assertValidatedApiPlan(prodArtifact.plan);
-        const validateEnvironmentArtifacts = async (
-          plan: ApiPlan,
-          terraformFile: string,
-          config: CheckmateConfig,
-          authorizationMode: "read_only" | "read_write",
-        ) => {
-          const apiValidation = await runApiValidation(
-            plan,
-            config,
-            authorizationMode,
-          );
-          const terraformValidation = await runTerraformValidation(
-            terraformFile,
-            config,
-          );
-          return { apiValidation, terraformValidation };
-        };
-        let devValidations: Awaited<
-          ReturnType<typeof validateEnvironmentArtifacts>
-        >;
-        let prodValidations: Awaited<
-          ReturnType<typeof validateEnvironmentArtifacts>
-        >;
+        let devTerraformValidation: TerraformValidationResult;
+        let prodTerraformValidation: TerraformValidationResult;
         if (devConfig.domain === prodConfig.domain) {
-          devValidations = await validateEnvironmentArtifacts(
-            devArtifact.plan,
+          devTerraformValidation = await runTerraformValidation(
             paths.dev.terraform,
             devConfig,
-            "read_write",
           );
-          prodValidations = await validateEnvironmentArtifacts(
-            prodArtifact.plan,
+          prodTerraformValidation = await runTerraformValidation(
             paths.prod.terraform,
             prodConfig,
-            "read_only",
           );
         } else {
-          [devValidations, prodValidations] = await Promise.all([
-            validateEnvironmentArtifacts(
-              devArtifact.plan,
-              paths.dev.terraform,
-              devConfig,
-              "read_write",
-            ),
-            validateEnvironmentArtifacts(
-              prodArtifact.plan,
-              paths.prod.terraform,
-              prodConfig,
-              "read_only",
-            ),
-          ]);
+          [devTerraformValidation, prodTerraformValidation] = await Promise.all(
+            [
+              runTerraformValidation(paths.dev.terraform, devConfig),
+              runTerraformValidation(paths.prod.terraform, prodConfig),
+            ],
+          );
         }
-        const { apiValidation: devApiValidation } = devValidations;
-        const { apiValidation: prodApiValidation } = prodValidations;
-        const { terraformValidation: devTerraformValidation } = devValidations;
-        const { terraformValidation: prodTerraformValidation } =
-          prodValidations;
+        const devApiValidation = devDraftValidation;
+        const prodApiValidation = prodDraftValidation;
         const invalidArtifacts = [
           ...(!devApiValidation.valid
             ? [`dev API: ${devApiValidation.error ?? "validation failed"}`]
@@ -1534,19 +1498,6 @@ export async function startUiServer(
           throw new Error(
             "Execution stopped because dev/api-plan.yml changed after review. Submit the decisions again to create and validate a new plan.",
           );
-        }
-        const [apiValidation, terraformValidation] = await Promise.all([
-          runApiValidation(devArtifact.plan, devConfig),
-          runTerraformValidation(
-            submittedPackage.paths.dev.terraform,
-            devConfig,
-          ),
-        ]);
-        submittedPackage.dev.apiValidation = apiValidation;
-        submittedPackage.dev.terraformValidation = terraformValidation;
-        if (!apiValidation.valid || !terraformValidation.valid) {
-          sendJson(response, 200, { executed: false, state: state() });
-          return;
         }
         executing = true;
         try {

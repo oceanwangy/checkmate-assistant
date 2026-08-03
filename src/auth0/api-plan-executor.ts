@@ -11,7 +11,9 @@ import { AppError, toErrorMessage } from "../utils/errors.js";
 import type { Fetcher } from "./fetcher.js";
 import {
   fetchWithRateLimitRetry,
+  rateLimitRetryLimit,
   type RateLimitRetryOptions,
+  waitForRateLimitRetry,
 } from "./rate-limit-retry.js";
 
 const tokenSchema = z.object({
@@ -802,47 +804,79 @@ export async function executeApiPlan(
         });
         continue;
       }
-      const body = requestBody(call, live);
-      const actual = apiRequestSha256(call.method, call.endpoint, body);
-      if (
-        call.validatedRequestSha256 &&
-        call.validatedRequestSha256 !== actual
-      ) {
-        throw new AppError(
-          "AUTH0_WRITE_FAILED",
-          `Execution stopped because the validated API request for ${call.resourceName} changed after package creation. Create and confirm a new dev package.`,
-        );
-      }
-      const approvedDigests = options.approvedRequestDigests;
-      if (approvedDigests) {
-        const approved = approvedDigests[call.id];
-        if (!approved || approved !== actual) {
+      let beforePatch = live;
+      let verifiedAfterRateLimit: Record<string, unknown> | undefined;
+      const retryLimit = rateLimitRetryLimit(options.retry);
+      for (let retryIndex = 0; ; retryIndex += 1) {
+        const body = requestBody(call, beforePatch);
+        const actual = apiRequestSha256(call.method, call.endpoint, body);
+        if (
+          call.validatedRequestSha256 &&
+          call.validatedRequestSha256 !== actual
+        ) {
           throw new AppError(
             "AUTH0_WRITE_FAILED",
-            `Execution stopped because the exact API request for ${call.resourceName} no longer matches the confirmed preview. Create and confirm a new dev plan.`,
+            `Execution stopped because the validated API request for ${call.resourceName} changed after package creation. Create and confirm a new dev package.`,
           );
         }
-      }
-      const response = await fetcher(new URL(call.endpoint, baseUrl), {
-        method: "PATCH",
-        headers: {
+        const approvedDigests = options.approvedRequestDigests;
+        if (approvedDigests) {
+          const approved = approvedDigests[call.id];
+          if (!approved || approved !== actual) {
+            throw new AppError(
+              "AUTH0_WRITE_FAILED",
+              `Execution stopped because the exact API request for ${call.resourceName} no longer matches the confirmed preview. Create and confirm a new dev plan.`,
+            );
+          }
+        }
+        const response = await fetcher(new URL(call.endpoint, baseUrl), {
+          method: "PATCH",
+          headers: {
+            authorization,
+            "content-type": "application/json",
+            "x-correlation-id": correlationId,
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (response.status !== 429) {
+          patchAccepted = response.ok;
+          await responseJson(response, `Auth0 update for ${call.resourceName}`);
+          break;
+        }
+        if (retryIndex >= retryLimit) {
+          await responseJson(response, `Auth0 update for ${call.resourceName}`);
+          throw new AppError(
+            "AUTH0_WRITE_FAILED",
+            `Auth0 update for ${call.resourceName} remained rate limited after recovery attempts.`,
+          );
+        }
+        await waitForRateLimitRetry(response, retryIndex, options.retry);
+        const observed = await readLiveResource(
+          fetcher,
+          baseUrl,
+          call,
           authorization,
-          "content-type": "application/json",
-          "x-correlation-id": correlationId,
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(30_000),
-      });
-      patchAccepted = response.ok;
-      await responseJson(response, `Auth0 update for ${call.resourceName}`);
-      const verified = await readLiveResource(
-        fetcher,
-        baseUrl,
-        call,
-        authorization,
-        options.retry,
-      );
-      verifyAppliedState(call, live, verified);
+          options.retry,
+        );
+        if (classifyLiveState(call, observed) === "target") {
+          verifyAppliedState(call, live, observed);
+          patchAccepted = true;
+          verifiedAfterRateLimit = observed;
+          break;
+        }
+        beforePatch = observed;
+      }
+      if (!verifiedAfterRateLimit) {
+        const verified = await readLiveResource(
+          fetcher,
+          baseUrl,
+          call,
+          authorization,
+          options.retry,
+        );
+        verifyAppliedState(call, live, verified);
+      }
       calls.push({
         id: call.id,
         endpoint: call.endpoint,

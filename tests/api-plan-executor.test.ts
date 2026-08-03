@@ -450,6 +450,94 @@ describe("Auth0 API plan executor", () => {
     expect(result.error).toContain("status 400: Payload validation failed");
   });
 
+  it("re-reads and safely retries a rate-limited PATCH", async () => {
+    const sleep = vi.fn(() => Promise.resolve());
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const after = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "good",
+        password_history: { enable: true },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Too many requests" }), {
+          status: 429,
+          headers: { "retry-after": "2" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)));
+
+    const result = await executeApiPlan(plan(), config, {
+      fetcher,
+      retry: { sleep },
+    });
+
+    expect(result).toMatchObject({
+      status: "succeeded",
+      calls: [{ status: "applied" }],
+    });
+    expect(sleep).toHaveBeenCalledWith(2_000);
+    expect(
+      fetcher.mock.calls.filter(([, request]) => request?.method === "PATCH"),
+    ).toHaveLength(2);
+  });
+
+  it("does not repeat a rate-limited PATCH when the target was applied", async () => {
+    const sleep = vi.fn(() => Promise.resolve());
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const after = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "good",
+        password_history: { enable: true },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Too many requests" }), {
+          status: 429,
+          headers: { "retry-after": "1" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(after)));
+
+    const result = await executeApiPlan(plan(), config, {
+      fetcher,
+      retry: { sleep },
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(
+      fetcher.mock.calls.filter(([, request]) => request?.method === "PATCH"),
+    ).toHaveLength(1);
+  });
+
   it("stops without patching when a live value has drifted", async () => {
     const fetcher = vi
       .fn<Fetcher>()

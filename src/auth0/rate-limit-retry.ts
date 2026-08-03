@@ -1,11 +1,20 @@
-const DEFAULT_RATE_LIMIT_RETRIES = 3;
-const MAX_RATE_LIMIT_DELAY_MS = 10_000;
+const DEFAULT_RATE_LIMIT_RETRIES = 5;
+const MAX_RATE_LIMIT_DELAY_MS = 30_000;
 
 export interface RateLimitRetryOptions {
   maxRetries?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   random?: () => number;
   now?: () => number;
+}
+
+export function rateLimitRetryLimit(
+  options: RateLimitRetryOptions = {},
+): number {
+  return Math.max(
+    0,
+    Math.min(options.maxRetries ?? DEFAULT_RATE_LIMIT_RETRIES, 10),
+  );
 }
 
 function rateLimitDelay(
@@ -37,18 +46,23 @@ export async function fetchWithRateLimitRetry(
   request: () => Promise<Response>,
   options: RateLimitRetryOptions = {},
 ): Promise<Response> {
-  const maxRetries = Math.max(
-    0,
-    Math.min(options.maxRetries ?? DEFAULT_RATE_LIMIT_RETRIES, 10),
-  );
+  const maxRetries = rateLimitRetryLimit(options);
+  for (let retryIndex = 0; ; retryIndex += 1) {
+    const response = await request();
+    if (response.status !== 429 || retryIndex >= maxRetries) return response;
+    await waitForRateLimitRetry(response, retryIndex, options);
+  }
+}
+
+export async function waitForRateLimitRetry(
+  response: Response,
+  retryIndex: number,
+  options: RateLimitRetryOptions = {},
+): Promise<void> {
   const sleep =
     options.sleep ??
     ((milliseconds: number) =>
       new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-  for (let retryIndex = 0; ; retryIndex += 1) {
-    const response = await request();
-    if (response.status !== 429 || retryIndex >= maxRetries) return response;
-    await response.body?.cancel();
-    await sleep(rateLimitDelay(response, retryIndex, options));
-  }
+  await response.body?.cancel();
+  await sleep(rateLimitDelay(response, retryIndex, options));
 }

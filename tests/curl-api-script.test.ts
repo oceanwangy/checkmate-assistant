@@ -48,6 +48,11 @@ describe("generated curl API scripts", () => {
     );
     expect(generated.script).toContain("--request PATCH");
     expect(generated.script).toContain("--data-binary @-");
+    expect(generated.script).toContain("PATCH_MAX_RETRIES=5");
+    expect(generated.script).toContain("--write-out '%{http_code}'");
+    expect(generated.script).toContain(
+      "waiting ${PATCH_DELAY}s before a safe re-check",
+    );
     expect(generated.script).toContain("umask 077");
     expect(generated.script).toContain('AUTH_HEADER_FILE="${WORK_DIRECTORY}');
     expect(generated.script).toContain('--header "@${AUTH_HEADER_FILE}"');
@@ -104,6 +109,24 @@ if [[ "$*" == *"/oauth/token"* ]]; then
   printf '%s' '{"access_token":"test-token","scope":"read:connections read:connections_options update:connections update:connections_options"}'
 elif [[ "$*" == *"--request PATCH"* ]]; then
   cat > "\${PATCH_BODY_FILE}"
+  output_file=""
+  headers_file=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --output)
+        shift
+        output_file="$1"
+        ;;
+      --dump-header)
+        shift
+        headers_file="$1"
+        ;;
+    esac
+    shift
+  done
+  [[ -z "\${output_file}" ]] || printf '%s' '{}' > "\${output_file}"
+  [[ -z "\${headers_file}" ]] || printf 'HTTP/2 200\\r\\n\\r\\n' > "\${headers_file}"
+  printf '200'
 else
   if [[ -s "\${PATCH_BODY_FILE}" ]]; then
     printf '%s' '${JSON.stringify(after)}'
@@ -154,6 +177,108 @@ fi
     const curlArguments = await readFile(curlArgsFile, "utf8");
     expect(curlArguments).not.toContain("secret-from-env");
     expect(curlArguments).not.toContain("test-token");
+  });
+
+  it("re-reads and safely retries a PATCH after Auth0 returns 429", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-curl-"));
+    const patchBodyFile = path.join(directory, "patch-body.json");
+    const patchCountFile = path.join(directory, "patch-count.txt");
+    const fakeCurl = path.join(directory, "curl");
+    const scriptFile = path.join(directory, "change.sh");
+    const before = {
+      id: "con_database",
+      name: "Username-Password-Authentication",
+      options: {
+        password_history: { enable: false, size: 5 },
+        requires_username: false,
+      },
+    };
+    const expectedBody = {
+      options: {
+        password_history: { enable: true, size: 5 },
+        requires_username: false,
+      },
+    };
+    const after = { ...before, options: expectedBody.options };
+    await writeFile(
+      fakeCurl,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"/oauth/token"* ]]; then
+  printf '%s' '{"access_token":"test-token","scope":"read:connections read:connections_options update:connections update:connections_options"}'
+elif [[ "$*" == *"--request PATCH"* ]]; then
+  cat > "\${PATCH_BODY_FILE}"
+  count=0
+  [[ ! -f "\${PATCH_COUNT_FILE}" ]] || count="$(cat "\${PATCH_COUNT_FILE}")"
+  count=$((count + 1))
+  printf '%s' "\${count}" > "\${PATCH_COUNT_FILE}"
+  output_file=""
+  headers_file=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --output)
+        shift
+        output_file="$1"
+        ;;
+      --dump-header)
+        shift
+        headers_file="$1"
+        ;;
+    esac
+    shift
+  done
+  if (( count == 1 )); then
+    [[ -z "\${output_file}" ]] || printf '%s' '{"message":"Global limit has been reached"}' > "\${output_file}"
+    [[ -z "\${headers_file}" ]] || printf 'HTTP/2 429\\r\\nRetry-After: 0\\r\\n\\r\\n' > "\${headers_file}"
+    printf '429'
+  else
+    [[ -z "\${output_file}" ]] || printf '%s' '{}' > "\${output_file}"
+    [[ -z "\${headers_file}" ]] || printf 'HTTP/2 200\\r\\n\\r\\n' > "\${headers_file}"
+    printf '200'
+  fi
+else
+  count=0
+  [[ ! -f "\${PATCH_COUNT_FILE}" ]] || count="$(cat "\${PATCH_COUNT_FILE}")"
+  if (( count >= 2 )); then
+    printf '%s' '${JSON.stringify(after)}'
+  else
+    printf '%s' '${JSON.stringify(before)}'
+  fi
+fi
+`,
+    );
+    await chmod(fakeCurl, 0o700);
+
+    const call = connectionCall();
+    const generated = buildCurlApiScript(
+      "dev",
+      call,
+      apiRequestSha256(call.method, call.endpoint, expectedBody),
+      "tenant.auth0.com",
+    );
+    await writeFile(scriptFile, generated.script, { mode: 0o700 });
+    const result = spawnSync("bash", [scriptFile], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ""}`,
+        PATCH_BODY_FILE: patchBodyFile,
+        PATCH_COUNT_FILE: patchCountFile,
+        AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+        AUTH0CHECKMATE_DEV_CLIENT_ID: "client-from-env",
+        AUTH0CHECKMATE_DEV_CLIENT_SECRET: "secret-from-env",
+      },
+    });
+
+    expect(result).toMatchObject({ status: 0 });
+    expect(result.stderr).toContain("waiting 0s before a safe re-check");
+    expect(result.stdout).toContain(
+      "Applied and verified: Username-Password-Authentication",
+    );
+    expect(await readFile(patchCountFile, "utf8")).toBe("2");
+    expect(JSON.parse(await readFile(patchBodyFile, "utf8"))).toEqual(
+      expectedBody,
+    );
   });
 
   it("stops before authentication when the configured tenant does not match", () => {

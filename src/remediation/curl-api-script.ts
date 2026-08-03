@@ -146,6 +146,28 @@ const field = process.argv[1];
 if (field === "body") process.stdout.write(JSON.stringify(value.body));
 else process.stdout.write(String(value[field] ?? ""));`;
 
+const RATE_LIMIT_DELAY_SCRIPT = `const fs = require("node:fs");
+const headers = fs.readFileSync(process.argv[1], "utf8");
+const attempt = Number.parseInt(process.argv[2] ?? "0", 10);
+const values = (name) => [...headers.matchAll(new RegExp("^" + name + ":\\\\s*([^\\\\r\\\\n]+)", "gim"))]
+  .map((match) => match[1].trim());
+const retryAfter = values("retry-after").at(-1);
+const resetAt = values("x-ratelimit-reset").at(-1);
+let delay;
+if (retryAfter && /^\\d+(?:\\.\\d+)?$/.test(retryAfter)) delay = Number(retryAfter);
+else if (retryAfter && Number.isFinite(Date.parse(retryAfter))) delay = (Date.parse(retryAfter) - Date.now()) / 1000;
+else if (resetAt && Number.isFinite(Number(resetAt))) delay = Number(resetAt) - Date.now() / 1000;
+else delay = Math.min(2 ** Math.max(Number.isFinite(attempt) ? attempt : 0, 0), 30);
+process.stdout.write(String(Math.min(Math.max(delay ?? 0, 0), 30)));`;
+
+const PATCH_ERROR_SCRIPT = `const fs = require("node:fs");
+try {
+  const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const message = [value.message, value.error_description, value.error]
+    .find((item) => typeof item === "string" && item.length > 0);
+  if (message) process.stdout.write(message.replace(/[\\r\\n]+/g, " ").slice(0, 500));
+} catch {}`;
+
 const VERIFY_SCRIPT = `const fs = require("node:fs");
 function pathValue(source, dottedPath) {
   return dottedPath.split(".").reduce((current, segment) =>
@@ -256,8 +278,11 @@ WORK_DIRECTORY="$(mktemp -d "\${TMPDIR:-/tmp}/checkmate-curl.XXXXXX")"
 TOKEN_PAYLOAD_FILE="\${WORK_DIRECTORY}/token-request.json"
 AUTH_HEADER_FILE="\${WORK_DIRECTORY}/authorization-header"
 BEFORE_FILE="\${WORK_DIRECTORY}/before.json"
+PATCH_RESPONSE_FILE="\${WORK_DIRECTORY}/patch-response.json"
+PATCH_HEADERS_FILE="\${WORK_DIRECTORY}/patch-headers.txt"
 cleanup() {
-  rm -f "\${TOKEN_PAYLOAD_FILE}" "\${AUTH_HEADER_FILE}" "\${BEFORE_FILE}"
+  rm -f "\${TOKEN_PAYLOAD_FILE}" "\${AUTH_HEADER_FILE}" "\${BEFORE_FILE}" \
+    "\${PATCH_RESPONSE_FILE}" "\${PATCH_HEADERS_FILE}"
   rmdir "\${WORK_DIRECTORY}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -273,7 +298,7 @@ unset CLIENT_SECRET
 
 TOKEN_RESPONSE="$(
   curl --fail-with-body --silent --show-error \\
-    --retry 3 --retry-delay 1 --retry-max-time 20 \\
+    --retry 5 --retry-delay 1 --retry-max-time 150 \\
     --request POST "\${BASE_URL}/oauth/token" \\
     --header 'content-type: application/json' \\
     --data-binary "@\${TOKEN_PAYLOAD_FILE}"
@@ -286,7 +311,7 @@ unset ACCESS_TOKEN TOKEN_RESPONSE CLIENT_ID
 
 read_resource() {
   curl --fail-with-body --silent --show-error \\
-    --retry 3 --retry-delay 1 --retry-max-time 20 \\
+    --retry 5 --retry-delay 1 --retry-max-time 150 \\
     "\${BASE_URL}\${CHECKMATE_READ_ENDPOINT}" \\
     --header "@\${AUTH_HEADER_FILE}"
 }
@@ -300,14 +325,60 @@ if [[ "\${STATE}" == "already_applied" ]]; then
   exit 0
 fi
 PATCH_BODY="$(printf '%s' "\${REQUEST}" | node -e ${bashQuote(RESPONSE_FIELD_SCRIPT)} body)"
+PATCH_ATTEMPT=0
+PATCH_MAX_RETRIES=5
+PATCH_CORRELATION_ID="checkmate-curl-$(date +%s)"
+while true; do
+  : > "\${PATCH_RESPONSE_FILE}"
+  : > "\${PATCH_HEADERS_FILE}"
+  if ! PATCH_STATUS="$(
+    printf '%s' "\${PATCH_BODY}" |
+      curl --silent --show-error \\
+        --output "\${PATCH_RESPONSE_FILE}" \\
+        --dump-header "\${PATCH_HEADERS_FILE}" \\
+        --write-out '%{http_code}' \\
+        --request PATCH "\${BASE_URL}\${CHECKMATE_ENDPOINT}" \\
+        --header "@\${AUTH_HEADER_FILE}" \\
+        --header 'content-type: application/json' \\
+        --header "x-correlation-id: \${PATCH_CORRELATION_ID}" \\
+        --data-binary @-
+  )"; then
+    echo "Auth0 PATCH request failed before a response was received." >&2
+    exit 1
+  fi
 
-printf '%s' "\${PATCH_BODY}" |
-  curl --fail-with-body --silent --show-error --output /dev/null \\
-    --request PATCH "\${BASE_URL}\${CHECKMATE_ENDPOINT}" \\
-    --header "@\${AUTH_HEADER_FILE}" \\
-    --header 'content-type: application/json' \\
-    --header "x-correlation-id: checkmate-curl-$(date +%s)" \\
-    --data-binary @-
+  case "\${PATCH_STATUS}" in
+    2??)
+      break
+      ;;
+    429)
+      if (( PATCH_ATTEMPT >= PATCH_MAX_RETRIES )); then
+        PATCH_ERROR="$(node -e ${bashQuote(PATCH_ERROR_SCRIPT)} "\${PATCH_RESPONSE_FILE}")"
+        echo "Auth0 PATCH remained rate limited after \${PATCH_MAX_RETRIES} controlled retries\${PATCH_ERROR:+: \${PATCH_ERROR}}." >&2
+        exit 1
+      fi
+      PATCH_DELAY="$(node -e ${bashQuote(RATE_LIMIT_DELAY_SCRIPT)} "\${PATCH_HEADERS_FILE}" "\${PATCH_ATTEMPT}")"
+      echo "Auth0 rate limit reached for \${CHECKMATE_RESOURCE_NAME}; waiting \${PATCH_DELAY}s before a safe re-check (retry $((PATCH_ATTEMPT + 1))/\${PATCH_MAX_RETRIES})." >&2
+      sleep "\${PATCH_DELAY}"
+
+      LIVE="$(read_resource)"
+      REQUEST="$(printf '%s' "\${LIVE}" | node -e ${bashQuote(REQUEST_BUILDER_SCRIPT)})"
+      STATE="$(printf '%s' "\${REQUEST}" | node -e ${bashQuote(RESPONSE_FIELD_SCRIPT)} state)"
+      if [[ "\${STATE}" == "already_applied" ]]; then
+        printf '%s' "\${LIVE}" | node -e ${bashQuote(VERIFY_SCRIPT)}
+        echo "Applied and verified: \${CHECKMATE_RESOURCE_NAME}"
+        exit 0
+      fi
+      PATCH_BODY="$(printf '%s' "\${REQUEST}" | node -e ${bashQuote(RESPONSE_FIELD_SCRIPT)} body)"
+      PATCH_ATTEMPT=$((PATCH_ATTEMPT + 1))
+      ;;
+    *)
+      PATCH_ERROR="$(node -e ${bashQuote(PATCH_ERROR_SCRIPT)} "\${PATCH_RESPONSE_FILE}")"
+      echo "Auth0 PATCH failed with status \${PATCH_STATUS}\${PATCH_ERROR:+: \${PATCH_ERROR}}." >&2
+      exit 1
+      ;;
+  esac
+done
 
 VERIFIED="$(read_resource)"
 printf '%s' "\${VERIFIED}" | node -e ${bashQuote(VERIFY_SCRIPT)}

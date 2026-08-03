@@ -608,8 +608,8 @@ describe("local review UI", () => {
         },
       });
       expect(planExecutor).toHaveBeenCalledOnce();
-      expect(apiPlanValidator).toHaveBeenCalledTimes(5);
-      expect(terraformValidator).toHaveBeenCalledTimes(3);
+      expect(apiPlanValidator).toHaveBeenCalledTimes(2);
+      expect(terraformValidator).toHaveBeenCalledTimes(2);
       const executionRecord = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
       );
