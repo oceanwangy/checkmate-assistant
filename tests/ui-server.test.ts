@@ -202,7 +202,7 @@ describe("local review UI", () => {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
           AUTH0CHECKMATE_DEV_CLIENT_ID: "inventory-client",
           AUTH0CHECKMATE_DEV_CLIENT_SECRET: "never-return-this-secret",
-          AUTH0CHECKMATE_PROD_DOMAIN: "prod.auth0.com",
+          AUTH0CHECKMATE_PROD_DOMAIN: "tenant.auth0.com",
           AUTH0CHECKMATE_PROD_CLIENT_ID: "prod-client",
           AUTH0CHECKMATE_PROD_CLIENT_SECRET: "prod-secret",
         },

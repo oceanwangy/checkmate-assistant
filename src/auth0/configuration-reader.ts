@@ -7,6 +7,10 @@ import type {
 } from "../remediation/actionable-change.js";
 import { AppError } from "../utils/errors.js";
 import type { Fetcher } from "./fetcher.js";
+import {
+  fetchWithRateLimitRetry,
+  type RateLimitRetryOptions,
+} from "./rate-limit-retry.js";
 
 const tokenSchema = z.object({ access_token: z.string().min(1) });
 const connectionSchema = z
@@ -33,16 +37,6 @@ const clientSchema = z
   .passthrough();
 const clientsSchema = z.array(clientSchema);
 const recordSchema = z.record(z.unknown());
-const DEFAULT_RATE_LIMIT_RETRIES = 3;
-const MAX_RATE_LIMIT_DELAY_MS = 10_000;
-
-interface RateLimitRetryOptions {
-  maxRetries?: number;
-  sleep?: (milliseconds: number) => Promise<void>;
-  random?: () => number;
-  now?: () => number;
-}
-
 interface ActionableConfigurationOptions {
   includeCompliant?: boolean;
   retry?: RateLimitRetryOptions;
@@ -93,51 +87,6 @@ async function parseJson(response: Response, label: string): Promise<unknown> {
     throw new AppError("AUTH0_READ_FAILED", `${label} returned invalid JSON.`, {
       cause: error,
     });
-  }
-}
-
-function rateLimitDelay(
-  response: Response,
-  retryIndex: number,
-  options: RateLimitRetryOptions,
-): number {
-  const retryAfter = response.headers.get("retry-after");
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    const delay = Number.isFinite(seconds)
-      ? seconds * 1_000
-      : Date.parse(retryAfter) - (options.now ?? Date.now)();
-    if (Number.isFinite(delay) && delay >= 0) {
-      return Math.min(delay, MAX_RATE_LIMIT_DELAY_MS);
-    }
-  }
-  const reset = Number(response.headers.get("x-ratelimit-reset"));
-  if (Number.isFinite(reset) && reset > 0) {
-    const delay = reset * 1_000 - (options.now ?? Date.now)();
-    if (delay >= 0) return Math.min(delay, MAX_RATE_LIMIT_DELAY_MS);
-  }
-  const baseDelay = Math.min(100 * 2 ** retryIndex, 1_000);
-  const jitter = 0.8 + (options.random ?? Math.random)() * 0.4;
-  return Math.round(baseDelay * jitter);
-}
-
-async function fetchWithRateLimitRetry(
-  request: () => Promise<Response>,
-  options: RateLimitRetryOptions = {},
-): Promise<Response> {
-  const maxRetries = Math.max(
-    0,
-    Math.min(options.maxRetries ?? DEFAULT_RATE_LIMIT_RETRIES, 10),
-  );
-  const sleep =
-    options.sleep ??
-    ((milliseconds: number) =>
-      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-  for (let retryIndex = 0; ; retryIndex += 1) {
-    const response = await request();
-    if (response.status !== 429 || retryIndex >= maxRetries) return response;
-    await response.body?.cancel();
-    await sleep(rateLimitDelay(response, retryIndex, options));
   }
 }
 

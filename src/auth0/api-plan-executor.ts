@@ -9,6 +9,10 @@ import {
 } from "../remediation/api-plan.js";
 import { AppError, toErrorMessage } from "../utils/errors.js";
 import type { Fetcher } from "./fetcher.js";
+import {
+  fetchWithRateLimitRetry,
+  type RateLimitRetryOptions,
+} from "./rate-limit-retry.js";
 
 const tokenSchema = z.object({
   access_token: z.string().min(1),
@@ -49,6 +53,7 @@ export interface ApiPlanExecutorOptions {
   approvedRequestDigests?: Readonly<Record<string, string>>;
   authorizationMode?: "read_only" | "read_write";
   previousExecution?: ApiExecutionResult;
+  retry?: RateLimitRetryOptions;
 }
 
 export interface ApiPlanValidationResult {
@@ -534,19 +539,24 @@ async function managementAuthorization(
   config: CheckmateConfig,
   scopes: string[],
   purpose: "validation" | "execution",
+  retry?: RateLimitRetryOptions,
 ): Promise<string> {
-  const response = await fetcher(`${baseUrl}/oauth/token`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "client_credentials",
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      audience: `${baseUrl}/api/v2/`,
-      scope: scopes.join(" "),
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
+  const response = await fetchWithRateLimitRetry(
+    () =>
+      fetcher(`${baseUrl}/oauth/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "client_credentials",
+          client_id: config.clientId,
+          client_secret: config.clientSecret,
+          audience: `${baseUrl}/api/v2/`,
+          scope: scopes.join(" "),
+        }),
+        signal: AbortSignal.timeout(30_000),
+      }),
+    retry,
+  );
   if (!response.ok) {
     throw new AppError(
       "AUTH0_WRITE_FAILED",
@@ -580,16 +590,21 @@ async function readLiveResource(
   baseUrl: string,
   call: ApiPlanCall,
   authorization: string,
+  retry?: RateLimitRetryOptions,
 ): Promise<Record<string, unknown>> {
   const url = new URL(call.endpoint, baseUrl);
   if (call.resourceType === "connection") {
     url.searchParams.set("fields", "id,name,strategy,options");
     url.searchParams.set("include_fields", "true");
   }
-  const response = await fetcher(url, {
-    headers: { authorization },
-    signal: AbortSignal.timeout(30_000),
-  });
+  const response = await fetchWithRateLimitRetry(
+    () =>
+      fetcher(url, {
+        headers: { authorization },
+        signal: AbortSignal.timeout(30_000),
+      }),
+    retry,
+  );
   return record(
     await responseJson(response, `Auth0 read for ${call.resourceName}`),
     call.resourceName,
@@ -628,6 +643,7 @@ export async function validateApiPlan(
     config,
     scopes,
     "validation",
+    options.retry,
   );
   const calls: ApiPlanValidationResult["calls"] = [];
   for (const call of plan.calls) {
@@ -637,6 +653,7 @@ export async function validateApiPlan(
         baseUrl,
         call,
         authorization,
+        options.retry,
       );
       const status = classifyLiveState(call, live);
       const body = requestBody(call, live);
@@ -722,6 +739,7 @@ export async function executeApiPlan(
     config,
     scopes,
     "execution",
+    options.retry,
   );
   const calls: ApiCallExecution[] = [];
   const previousCalls = new Map(
@@ -739,6 +757,7 @@ export async function executeApiPlan(
         baseUrl,
         call,
         authorization,
+        options.retry,
       );
       const previous = previousCalls.get(call.id);
       if (
@@ -821,6 +840,7 @@ export async function executeApiPlan(
         baseUrl,
         call,
         authorization,
+        options.retry,
       );
       verifyAppliedState(call, live, verified);
       calls.push({
@@ -907,6 +927,7 @@ export async function rollbackApiPlan(
     config,
     scopesFor(plan, "read_write"),
     "execution",
+    options.retry,
   );
   const calls: ApiCallExecution[] = [];
 
@@ -920,6 +941,7 @@ export async function rollbackApiPlan(
         baseUrl,
         call,
         authorization,
+        options.retry,
       );
       if (classifyLiveState(call, live) === "target") {
         calls.push({
@@ -947,6 +969,7 @@ export async function rollbackApiPlan(
         baseUrl,
         call,
         authorization,
+        options.retry,
       );
       verifyAppliedState(call, live, verified);
       calls.push({

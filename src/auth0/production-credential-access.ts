@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { CheckmateConfig } from "../config/env.js";
 import type { Fetcher } from "./fetcher.js";
+import {
+  fetchWithRateLimitRetry,
+  type RateLimitRetryOptions,
+} from "./rate-limit-retry.js";
 
 const tokenSchema = z.object({
   access_token: z.string().min(1),
@@ -17,6 +21,7 @@ export interface ProductionCredentialAccessResult {
 interface ProductionCredentialAccessOptions {
   fetcher?: Fetcher;
   now?: () => Date;
+  retry?: RateLimitRetryOptions;
 }
 
 function tokenScopes(accessToken: string): string[] {
@@ -68,19 +73,21 @@ export async function assessProductionCredentialAccess(
   }
 
   try {
-    const response = await (options.fetcher ?? fetch)(
-      `https://${domain}/oauth/token`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          grant_type: "client_credentials",
-          client_id: config.clientId,
-          client_secret: config.clientSecret,
-          audience: `https://${domain}/api/v2/`,
+    const fetcher = options.fetcher ?? fetch;
+    const response = await fetchWithRateLimitRetry(
+      () =>
+        fetcher(`https://${domain}/oauth/token`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            grant_type: "client_credentials",
+            client_id: config.clientId,
+            client_secret: config.clientSecret,
+            audience: `https://${domain}/api/v2/`,
+          }),
+          signal: AbortSignal.timeout(30_000),
         }),
-        signal: AbortSignal.timeout(30_000),
-      },
+      options.retry,
     );
     if (!response.ok) {
       return {

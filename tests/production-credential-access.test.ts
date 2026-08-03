@@ -69,4 +69,33 @@ describe("production credential access assessment", () => {
       assessProductionCredentialAccess(config, { fetcher }),
     ).resolves.toMatchObject({ status: "unverified", writeScopes: [] });
   });
+
+  it("retries a rate-limited credential token request", async () => {
+    const sleep = vi.fn(() => Promise.resolve());
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Too many requests" }), {
+          status: 429,
+          headers: { "retry-after": "2" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: "opaque-token",
+            scope: "read:clients",
+          }),
+        ),
+      );
+
+    const result = await assessProductionCredentialAccess(config, {
+      fetcher,
+      retry: { sleep },
+    });
+
+    expect(result.status).toBe("read_only");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(2_000);
+  });
 });

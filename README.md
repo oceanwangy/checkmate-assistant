@@ -157,7 +157,7 @@ During submission, the application also obtains a production Management API toke
 
 The generated provider block contains no credentials. When using a downloaded package manually, provide `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET`, select an appropriate Terraform backend, review `terraform plan`, and apply the development package first. Promote the separately generated production package through the normal production change-management process.
 
-Read-only Auth0 configuration calls automatically retry up to three times when Auth0 returns HTTP 429. The retry uses `Retry-After` or `X-RateLimit-Reset` when available and otherwise uses bounded exponential backoff with jitter.
+Read-only Auth0 configuration, API-plan preflight, verification, and credential-inspection calls automatically retry up to three times when Auth0 returns HTTP 429. The retry uses `Retry-After` or `X-RateLimit-Reset` when available and otherwise uses bounded exponential backoff with jitter. Requests for one environment are sequenced, and dev/prod validation is also sequenced when both profiles temporarily point to the same tenant, avoiding avoidable global-rate-limit collisions. PATCH requests are never retried automatically.
 
 The saved development `api-plan.yml` is the canonical execution artifact. The application records the complete file's SHA-256 digest at submission, reads and parses it again immediately before execution, and stops if that file changed after review. It separately compares each rebuilt PATCH request with the request digest stamped during package creation, so live nested configuration drift also stops execution. The execution audit record stores the file digest.
 

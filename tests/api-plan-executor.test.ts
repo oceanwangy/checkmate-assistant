@@ -205,6 +205,39 @@ describe("Auth0 API plan executor", () => {
     ).toBe(false);
   });
 
+  it("retries a rate-limited live preflight read", async () => {
+    const sleep = vi.fn(() => Promise.resolve());
+    const before = {
+      id: "con_database",
+      options: {
+        passwordPolicy: "fair",
+        password_history: { enable: false },
+      },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Too many requests" }), {
+          status: 429,
+          headers: { "retry-after": "1" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(before)));
+
+    const result = await validateApiPlan(plan(), config, {
+      fetcher,
+      retry: { sleep },
+    });
+
+    expect(result).toMatchObject({ valid: true, calls: [{ status: "ready" }] });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(1_000);
+  });
+
   it("rejects API validation when Auth0 reports a missing update scope", async () => {
     const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(
       new Response(

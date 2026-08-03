@@ -1253,16 +1253,38 @@ export async function startUiServer(
         const prodConfig = loadCheckmateConfig("prod", env);
         const configurationLoader =
           dependencies.configurationLoader ?? loadActionableConfiguration;
-        const [devConfiguration, prodConfiguration, prodCredentialAccess] =
-          await Promise.all([
-            configurationLoader(findings, devConfig, undefined, {
-              includeCompliant: true,
-            }),
-            configurationLoader(findings, prodConfig, undefined, {
-              includeCompliant: true,
-            }),
-            inspectProductionCredential(prodConfig),
+        let devConfiguration: ActionableConfigurationMap;
+        let prodConfiguration: ActionableConfigurationMap;
+        let prodCredentialAccess: ProductionCredentialAccessResult;
+        const loadDevConfiguration = () =>
+          configurationLoader(findings, devConfig, undefined, {
+            includeCompliant: true,
+          });
+        const loadProdEnvironment = async () => {
+          const configuration = await configurationLoader(
+            findings,
+            prodConfig,
+            undefined,
+            { includeCompliant: true },
+          );
+          const credentialAccess =
+            await inspectProductionCredential(prodConfig);
+          return { configuration, credentialAccess };
+        };
+        if (devConfig.domain === prodConfig.domain) {
+          devConfiguration = await loadDevConfiguration();
+          const prodEnvironment = await loadProdEnvironment();
+          prodConfiguration = prodEnvironment.configuration;
+          prodCredentialAccess = prodEnvironment.credentialAccess;
+        } else {
+          const [loadedDev, prodEnvironment] = await Promise.all([
+            loadDevConfiguration(),
+            loadProdEnvironment(),
           ]);
+          devConfiguration = loadedDev;
+          prodConfiguration = prodEnvironment.configuration;
+          prodCredentialAccess = prodEnvironment.credentialAccess;
+        }
         const generatedAt = now().toISOString();
         const devDraftPlan = buildProfileApiPlan(
           session,
@@ -1299,10 +1321,21 @@ export async function startUiServer(
             `The dual-format change package cannot be created because these accepted changes do not have a safe official Auth0 Terraform mapping: ${detail}. Leave them unchanged and handle them through the documented manual change process.`,
           );
         }
-        const [devDraftValidation, prodDraftValidation] = await Promise.all([
-          runApiValidation(devDraftPlan, devConfig),
-          runApiValidation(prodDraftPlan, prodConfig, "read_only"),
-        ]);
+        let devDraftValidation: ApiPlanValidationResult;
+        let prodDraftValidation: ApiPlanValidationResult;
+        if (devConfig.domain === prodConfig.domain) {
+          devDraftValidation = await runApiValidation(devDraftPlan, devConfig);
+          prodDraftValidation = await runApiValidation(
+            prodDraftPlan,
+            prodConfig,
+            "read_only",
+          );
+        } else {
+          [devDraftValidation, prodDraftValidation] = await Promise.all([
+            runApiValidation(devDraftPlan, devConfig),
+            runApiValidation(prodDraftPlan, prodConfig, "read_only"),
+          ]);
+        }
         if (!devDraftValidation.valid || !prodDraftValidation.valid) {
           const failures = [
             ...(devDraftValidation.valid
@@ -1361,17 +1394,63 @@ export async function startUiServer(
         ]);
         assertValidatedApiPlan(devArtifact.plan);
         assertValidatedApiPlan(prodArtifact.plan);
-        const [
-          devApiValidation,
-          prodApiValidation,
-          devTerraformValidation,
-          prodTerraformValidation,
-        ] = await Promise.all([
-          runApiValidation(devArtifact.plan, devConfig),
-          runApiValidation(prodArtifact.plan, prodConfig, "read_only"),
-          runTerraformValidation(paths.dev.terraform, devConfig),
-          runTerraformValidation(paths.prod.terraform, prodConfig),
-        ]);
+        const validateEnvironmentArtifacts = async (
+          plan: ApiPlan,
+          terraformFile: string,
+          config: CheckmateConfig,
+          authorizationMode: "read_only" | "read_write",
+        ) => {
+          const apiValidation = await runApiValidation(
+            plan,
+            config,
+            authorizationMode,
+          );
+          const terraformValidation = await runTerraformValidation(
+            terraformFile,
+            config,
+          );
+          return { apiValidation, terraformValidation };
+        };
+        let devValidations: Awaited<
+          ReturnType<typeof validateEnvironmentArtifacts>
+        >;
+        let prodValidations: Awaited<
+          ReturnType<typeof validateEnvironmentArtifacts>
+        >;
+        if (devConfig.domain === prodConfig.domain) {
+          devValidations = await validateEnvironmentArtifacts(
+            devArtifact.plan,
+            paths.dev.terraform,
+            devConfig,
+            "read_write",
+          );
+          prodValidations = await validateEnvironmentArtifacts(
+            prodArtifact.plan,
+            paths.prod.terraform,
+            prodConfig,
+            "read_only",
+          );
+        } else {
+          [devValidations, prodValidations] = await Promise.all([
+            validateEnvironmentArtifacts(
+              devArtifact.plan,
+              paths.dev.terraform,
+              devConfig,
+              "read_write",
+            ),
+            validateEnvironmentArtifacts(
+              prodArtifact.plan,
+              paths.prod.terraform,
+              prodConfig,
+              "read_only",
+            ),
+          ]);
+        }
+        const { apiValidation: devApiValidation } = devValidations;
+        const { apiValidation: prodApiValidation } = prodValidations;
+        const { terraformValidation: devTerraformValidation } = devValidations;
+        const { terraformValidation: prodTerraformValidation } =
+          prodValidations;
         const invalidArtifacts = [
           ...(!devApiValidation.valid
             ? [`dev API: ${devApiValidation.error ?? "validation failed"}`]
