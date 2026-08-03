@@ -289,7 +289,8 @@ describe("Auth0 actionable configuration reader", () => {
                 alg: "HS256",
                 lifetime_in_seconds: 36000,
               },
-              cross_origin_auth: true,
+              cross_origin_auth: false,
+              cross_origin_authentication: true,
               grant_types: ["authorization_code", "implicit", "refresh_token"],
               callbacks: [
                 "https://test.example.com/auth/callback",
@@ -322,7 +323,7 @@ describe("Auth0 actionable configuration reader", () => {
         resourceType: "client",
         resourceId: "client_12345678",
         resourceName: "Test App",
-        configPath: "cross_origin_auth",
+        configPath: "cross_origin_authentication",
         currentValue: true,
         targetValue: false,
       },

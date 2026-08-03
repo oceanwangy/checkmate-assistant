@@ -375,14 +375,14 @@ function clientChanges(
   }
   if (finding.validatorId === "checkCrossOriginAuthentication") {
     const current =
-      client.cross_origin_auth ?? client.cross_origin_authentication ?? null;
+      client.cross_origin_authentication ?? client.cross_origin_auth ?? null;
     if (current !== null) {
       proposed.push(
         change(
           "client",
           client.client_id,
           client.name,
-          "cross_origin_auth",
+          "cross_origin_authentication",
           current,
           false,
           includeCompliant,

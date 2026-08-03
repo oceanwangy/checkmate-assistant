@@ -169,7 +169,7 @@ const deterministicApplicationGroups = [
   },
   {
     key: "applications-disable-cross-origin",
-    configPath: "cross_origin_auth",
+    configPath: "cross_origin_authentication",
     title: "Disable cross-origin authentication for",
     whatItMeans: [
       "These applications currently allow cross-origin authentication.",

@@ -105,7 +105,7 @@ function clientPlan(): ApiPlan {
         actionIds: ["action-alg", "action-cross-origin", "action-implicit"],
         preconditions: [
           { path: "jwt_configuration.alg", expectedValue: "HS256" },
-          { path: "cross_origin_auth", expectedValue: true },
+          { path: "cross_origin_authentication", expectedValue: true },
           {
             path: "grant_types",
             expectedValue: ["authorization_code", "implicit", "refresh_token"],
@@ -113,7 +113,7 @@ function clientPlan(): ApiPlan {
         ],
         body: {
           jwt_configuration: { alg: "RS256" },
-          cross_origin_auth: false,
+          cross_origin_authentication: false,
           grant_types: ["authorization_code", "refresh_token"],
         },
       },
@@ -417,7 +417,7 @@ describe("Auth0 API plan executor", () => {
         lifetime_in_seconds: 36000,
         secret_encoded: false,
       },
-      cross_origin_auth: true,
+      cross_origin_authentication: true,
       grant_types: ["authorization_code", "implicit", "refresh_token"],
     };
     const after = {
@@ -426,7 +426,7 @@ describe("Auth0 API plan executor", () => {
         ...before.jwt_configuration,
         alg: "RS256",
       },
-      cross_origin_auth: false,
+      cross_origin_authentication: false,
       grant_types: ["authorization_code", "refresh_token"],
     };
     const fetcher = vi
@@ -454,7 +454,7 @@ describe("Auth0 API plan executor", () => {
         lifetime_in_seconds: 36000,
         secret_encoded: false,
       },
-      cross_origin_auth: false,
+      cross_origin_authentication: false,
       grant_types: ["authorization_code", "refresh_token"],
     });
   });

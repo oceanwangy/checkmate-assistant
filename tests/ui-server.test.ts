@@ -577,6 +577,15 @@ describe("local review UI", () => {
           value: "implicit",
           message: "The Implicit grant type is enabled.",
         },
+        {
+          finding_name: "checkCrossOriginAuthentication",
+          finding_title: "Cross Origin Authentication",
+          status: "red",
+          severity: "High",
+          name: "Default App (client_default12345) (First-Party Application)",
+          field: "cross_origin_authentication_enabled",
+          message: "Cross-origin authentication is enabled.",
+        },
       ]),
     );
     const triageFindings = vi.fn().mockResolvedValue([]);
@@ -589,6 +598,21 @@ describe("local review UI", () => {
         Promise.resolve(
           new Map(
             findings.map((finding, index): [string, ActionableChange[]] => {
+              if (finding.validatorId === "checkCrossOriginAuthentication") {
+                return [
+                  finding.id,
+                  [
+                    {
+                      resourceType: "client",
+                      resourceId: "client_default12345",
+                      resourceName: "Default App",
+                      configPath: "cross_origin_authentication",
+                      currentValue: true,
+                      targetValue: false,
+                    },
+                  ],
+                ];
+              }
               const suffix = index === 0 ? "one" : "two";
               return [
                 finding.id,
@@ -652,8 +676,14 @@ describe("local review UI", () => {
           actionableChanges: Array<{ actionId: string; resourceName: string }>;
         }>;
       };
-      expect(state.findings).toHaveLength(1);
-      expect(state.findings[0]).toMatchObject({
+      expect(state.findings).toHaveLength(2);
+      const implicitRecommendation = state.findings.find(
+        (finding) => finding.key === "applications-remove-implicit",
+      );
+      const crossOriginRecommendation = state.findings.find(
+        (finding) => finding.key === "applications-disable-cross-origin",
+      );
+      expect(implicitRecommendation).toMatchObject({
         key: "applications-remove-implicit",
         title: "Remove the Implicit grant type from",
         selectionMode: "applications",
@@ -662,10 +692,16 @@ describe("local review UI", () => {
           { resourceName: "App Two" },
         ],
       });
+      expect(crossOriginRecommendation).toMatchObject({
+        key: "applications-disable-cross-origin",
+        title: "Disable cross-origin authentication for",
+        selectionMode: "applications",
+        actionableChanges: [{ resourceName: "Default App" }],
+      });
       expect(triageFindings).not.toHaveBeenCalled();
 
       const selectedActionId =
-        state.findings[0]!.actionableChanges[0]!.actionId;
+        implicitRecommendation!.actionableChanges[0]!.actionId;
       const save = await fetch(`${running.url}/api/decision`, {
         method: "POST",
         headers: {
@@ -674,7 +710,7 @@ describe("local review UI", () => {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          findingKey: state.findings[0]!.key,
+          findingKey: implicitRecommendation!.key,
           status: "approved",
           rationale: "",
           selectedActionIds: [selectedActionId],
