@@ -4,7 +4,6 @@ import { initialiseEnvironment } from "./config/env.js";
 import { registerScanCommand } from "./commands/scan.js";
 import { registerImportReportCommand } from "./commands/import-report.js";
 import { registerListFindingsCommand } from "./commands/list-findings.js";
-import { registerReviewCommand } from "./commands/review.js";
 import { registerUiCommand } from "./commands/ui.js";
 import { toErrorMessage } from "./utils/errors.js";
 
@@ -21,7 +20,6 @@ const program = new Command()
 registerScanCommand(program);
 registerImportReportCommand(program);
 registerListFindingsCommand(program);
-registerReviewCommand(program);
 registerUiCommand(program);
 
 program.parseAsync(process.argv).catch((error: unknown) => {

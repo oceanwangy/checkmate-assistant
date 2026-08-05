@@ -16,7 +16,7 @@ function scopes(call: ApiPlanCall): string {
   if (call.resourceType === "attack_protection") {
     return "read:attack_protection update:attack_protection";
   }
-  return "read:resource_servers update:resource_servers";
+  throw new Error("Unsupported API plan resource type.");
 }
 
 function readEndpoint(call: ApiPlanCall): string {
@@ -68,6 +68,7 @@ function pathValue(source, dottedPath) {
 }
 
 function same(left, right) {
+  if ((left === null || left === undefined) && (right === null || right === undefined)) return true;
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
@@ -118,9 +119,7 @@ try {
   if (!safe) throw new Error("Execution stopped: live configuration drifted from the validated plan.");
 
   let body;
-  if (process.env.CHECKMATE_BODY_STRATEGY === "planned_partial") {
-    body = structuredClone(planned);
-  } else if (process.env.CHECKMATE_BODY_STRATEGY === "merge_live_nested_objects") {
+  if (process.env.CHECKMATE_BODY_STRATEGY === "merge_live_nested_objects") {
     body = Object.fromEntries(Object.entries(planned).map(([key, value]) => [key, merge(live[key], value)]));
   } else if (process.env.CHECKMATE_BODY_STRATEGY === "merge_live_connection_options") {
     body = { options: merge(stripNulls(live.options ?? {}), planned.options) };
@@ -176,6 +175,7 @@ function pathValue(source, dottedPath) {
       : undefined, source);
 }
 function same(left, right) {
+  if ((left === null || left === undefined) && (right === null || right === undefined)) return true;
   return JSON.stringify(left) === JSON.stringify(right);
 }
 function preservationDifference(before, after, selectedPaths, currentPath = "") {

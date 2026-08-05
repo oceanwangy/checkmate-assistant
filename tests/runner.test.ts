@@ -42,11 +42,11 @@ describe("CheckMate runner", () => {
   it("does not forward unrelated credentials from the parent environment", () => {
     const childEnvironment = buildCheckmateEnvironment(config, {
       PATH: "/usr/bin",
-      OPENAI_API_KEY: "openai-secret",
+      UNRELATED_API_KEY: "unrelated-secret",
       GITHUB_TOKEN: "github-secret",
     });
     expect(childEnvironment.PATH).toBe("/usr/bin");
-    expect(childEnvironment.OPENAI_API_KEY).toBeUndefined();
+    expect(childEnvironment.UNRELATED_API_KEY).toBeUndefined();
     expect(childEnvironment.GITHUB_TOKEN).toBeUndefined();
   });
 

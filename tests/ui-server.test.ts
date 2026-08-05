@@ -2,7 +2,6 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { AiProvider } from "../src/ai/provider.js";
 import type {
   ApiExecutionResult,
   ApiPlanValidationResult,
@@ -10,7 +9,6 @@ import type {
 import type { NormalizedCheckmateFinding } from "../src/findings/types.js";
 import type { ScanMetadata } from "../src/checkmate/types.js";
 import type { ActionableChange } from "../src/remediation/actionable-change.js";
-import { buildActionCandidates } from "../src/remediation/action-candidates.js";
 import { apiPlanSchema, type ApiPlan } from "../src/remediation/api-plan.js";
 import { createChangePackagePaths } from "../src/remediation/change-package-writer.js";
 import { reviewSessionSchema } from "../src/remediation/review-schema.js";
@@ -19,7 +17,7 @@ import { startUiServer } from "../src/ui/server.js";
 import { parse } from "yaml";
 
 describe("local review UI", () => {
-  it("shows only AI-selected findings and saves a validated decision", async () => {
+  it("shows only supported findings and saves a validated decision", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-ui-"));
     const reportPath = path.join(directory, "report.json");
     const outputDirectory = path.join(directory, "plans");
@@ -56,39 +54,6 @@ describe("local review UI", () => {
         },
       ]),
     );
-    const triageFindings = vi.fn(
-      (
-        findings: readonly NormalizedCheckmateFinding[],
-        configuration: ReadonlyMap<
-          string,
-          readonly ActionableChange[]
-        > = new Map(),
-      ) => {
-        if (findings.length === 0) return Promise.resolve([]);
-        return Promise.resolve(
-          buildActionCandidates(configuration).map((candidate) => ({
-            findingId: candidate.findingId,
-            actionId: candidate.actionId,
-            recommendationTitle: candidate.change.configPath.includes(
-              "password_history",
-            )
-              ? "Enable password history"
-              : "Set a strong password policy",
-            whatItMeans: ["The password policy is below the required level."],
-            suggestedChanges: [
-              candidate.change.configPath.includes("password_history")
-                ? "Prevent users from reusing recent passwords."
-                : "Set the password policy to good.",
-            ],
-            reason: ["This is a direct enum change."],
-          })),
-        );
-      },
-    );
-    const provider: AiProvider = {
-      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
-      triageFindings,
-    };
     const configurationLoader = vi.fn(
       (
         findings: readonly NormalizedCheckmateFinding[],
@@ -196,8 +161,6 @@ describe("local review UI", () => {
         outputDirectory,
       },
       {
-        provider,
-        model: "gpt-5.4-mini",
         env: {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
           AUTH0CHECKMATE_DEV_CLIENT_ID: "inventory-client",
@@ -287,6 +250,7 @@ describe("local review UI", () => {
           points: number;
           analysis: { remediationConsiderations: string[] };
           actionableChanges: Array<{
+            actionId: string;
             configPath: string;
             currentValue: string;
             targetValue: string;
@@ -295,12 +259,23 @@ describe("local review UI", () => {
       };
       expect(triaged.triaged).toBe(true);
       expect(triaged.findings).toHaveLength(2);
-      expect(triaged.findings[0]).toMatchObject({
-        title: "Set a strong password policy",
+      const passwordPolicy = triaged.findings.find(
+        ({ title }) =>
+          title ===
+          "Set the password policy to Good for Username-Password-Authentication",
+      );
+      const passwordHistory = triaged.findings.find(
+        ({ title }) => title === "Enable password history",
+      );
+      expect(passwordPolicy).toMatchObject({
+        title:
+          "Set the password policy to Good for Username-Password-Authentication",
         impact: "High priority",
         points: 5,
         analysis: {
-          remediationConsiderations: ["Set the password policy to good."],
+          remediationConsiderations: [
+            "Set the password policy to Good for Username-Password-Authentication.",
+          ],
         },
         actionableChanges: [
           {
@@ -320,8 +295,7 @@ describe("local review UI", () => {
           recommendationAvailable: false,
         }),
       );
-      expect(triageFindings).toHaveBeenCalledOnce();
-      const findingKey = triaged.findings[0]!.key;
+      const findingKey = passwordPolicy!.key;
 
       const saveResponse = await fetch(`${running.url}/api/decision`, {
         method: "POST",
@@ -356,7 +330,6 @@ describe("local review UI", () => {
       const stored = reviewSessionSchema.parse(
         JSON.parse(await readFile(running.outputPath, "utf8")) as unknown,
       );
-      expect(stored.decisions[0]?.answers).toEqual([]);
       expect(stored.decisions[0]?.decision.status).toBe("accepted_risk");
       expect(stored.decisions[0]?.decision.rationale).toBe(
         "The current access is temporarily accepted.",
@@ -371,6 +344,9 @@ describe("local review UI", () => {
         targetValue: "good",
       });
       expect(stored.review.completedAt).toBeUndefined();
+      expect(stored.review.guidanceEngine).toBe(
+        "checkmate-1.8.3-deterministic-guidance-v1",
+      );
 
       const earlySubmitResponse = await fetch(`${running.url}/api/submit`, {
         method: "POST",
@@ -391,7 +367,7 @@ describe("local review UI", () => {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          findingKey: triaged.findings[1]!.key,
+          findingKey: passwordHistory!.key,
           status: "approved",
           rationale: "Accept the second independent action.",
         }),
@@ -415,7 +391,7 @@ describe("local review UI", () => {
       );
       expect(completed.decisions).toHaveLength(2);
       expect(completed.decisions[1]?.actionableChangeId).toBe(
-        triaged.findings[1]!.key,
+        passwordHistory!.actionableChanges[0]!.actionId,
       );
       expect(completed.review.completedAt).toBeTruthy();
 
@@ -487,7 +463,7 @@ describe("local review UI", () => {
       expect(apiPlan.calls[0]).toMatchObject({
         method: "PATCH",
         endpoint: "/api/v2/connections/con_dev",
-        actionIds: [triaged.findings[1]!.key],
+        actionIds: [passwordHistory!.actionableChanges[0]!.actionId],
         body: {
           options: { password_history: { enable: true } },
         },
@@ -699,11 +675,6 @@ describe("local review UI", () => {
         },
       ]),
     );
-    const triageFindings = vi.fn().mockResolvedValue([]);
-    const provider: AiProvider = {
-      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
-      triageFindings,
-    };
     const configurationLoader = vi.fn(
       (findings: readonly NormalizedCheckmateFinding[]) =>
         Promise.resolve(
@@ -755,7 +726,6 @@ describe("local review UI", () => {
         outputDirectory: directory,
       },
       {
-        provider,
         configurationLoader,
         env: {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
@@ -812,8 +782,6 @@ describe("local review UI", () => {
         defaultSelected: true,
         actionableChanges: [{ resourceName: "Default App" }],
       });
-      expect(triageFindings).not.toHaveBeenCalled();
-
       const selectedActionId =
         implicitRecommendation!.actionableChanges[0]!.actionId;
       const save = await fetch(`${running.url}/api/decision`, {
@@ -840,7 +808,7 @@ describe("local review UI", () => {
       ).toEqual(["approved", "accepted_risk"]);
       expect(
         stored.decisions.map((decision) => decision.decision.rationale),
-      ).toEqual(["Accepted AI suggestion.", "Remained unchanged."]);
+      ).toEqual(["Accepted suggestion.", "Remained unchanged."]);
       expect(
         stored.decisions.every(
           (decision) => decision.decision.adminNote === undefined,
@@ -874,39 +842,7 @@ describe("local review UI", () => {
         },
       ]),
     );
-    const triageFindings = vi.fn().mockResolvedValue([]);
-    const provider: AiProvider = {
-      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
-      triageFindings,
-    };
-    const configurationLoader = vi.fn(
-      (findings: readonly NormalizedCheckmateFinding[]) =>
-        Promise.resolve(
-          new Map([
-            [
-              findings[0]!.id,
-              [
-                {
-                  resourceType: "resource_server" as const,
-                  resourceId: "auth0-management-api",
-                  resourceName: "Auth0 Management API",
-                  configPath: "subject_type_authorization.user.policy",
-                  currentValue: "allow_all",
-                  targetValue: "require_client_grant",
-                },
-                {
-                  resourceType: "resource_server" as const,
-                  resourceId: "auth0-management-api",
-                  resourceName: "Auth0 Management API",
-                  configPath: "subject_type_authorization.user.policy",
-                  currentValue: "allow_all",
-                  targetValue: "deny_all",
-                },
-              ],
-            ],
-          ]),
-        ),
-    );
+    const configurationLoader = vi.fn(() => Promise.resolve(new Map()));
     const running = await startUiServer(
       {
         report: reportPath,
@@ -916,7 +852,6 @@ describe("local review UI", () => {
         outputDirectory: directory,
       },
       {
-        provider,
         configurationLoader,
         env: {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
@@ -962,7 +897,6 @@ describe("local review UI", () => {
           recommendationAvailable: false,
         }),
       ]);
-      expect(triageFindings).not.toHaveBeenCalled();
     } finally {
       await running.close();
     }
@@ -1039,11 +973,6 @@ describe("local review UI", () => {
         },
       ]),
     );
-    const triageFindings = vi.fn().mockResolvedValue([]);
-    const provider: AiProvider = {
-      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
-      triageFindings,
-    };
     const configurationLoader = vi.fn(
       (findings: readonly NormalizedCheckmateFinding[]) =>
         Promise.resolve(
@@ -1078,7 +1007,6 @@ describe("local review UI", () => {
         outputDirectory: directory,
       },
       {
-        provider,
         configurationLoader,
         env: {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
@@ -1149,7 +1077,6 @@ describe("local review UI", () => {
           { resourceName: "Username-Password-Authentication" },
         ],
       });
-      expect(triageFindings).not.toHaveBeenCalled();
     } finally {
       await running.close();
     }
@@ -1183,11 +1110,6 @@ describe("local review UI", () => {
         },
       ]),
     );
-    const triageFindings = vi.fn().mockResolvedValue([]);
-    const provider: AiProvider = {
-      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
-      triageFindings,
-    };
     const currentCallbacks = [
       "http://localhost:3000/auth/callback",
       "http://localhost:4000/auth/callback",
@@ -1226,7 +1148,6 @@ describe("local review UI", () => {
         outputDirectory: directory,
       },
       {
-        provider,
         configurationLoader,
         env: {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
@@ -1270,8 +1191,6 @@ describe("local review UI", () => {
         defaultSelected: false,
       });
       expect(state.findings[0]?.actionableChanges).toHaveLength(2);
-      expect(triageFindings).not.toHaveBeenCalled();
-
       const selectedActionId =
         state.findings[0]!.actionableChanges[0]!.actionId;
       const save = await fetch(`${running.url}/api/decision`, {
@@ -1327,28 +1246,6 @@ describe("local review UI", () => {
         reportPath,
       } satisfies ScanMetadata;
     });
-    const provider: AiProvider = {
-      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
-      triageFindings: vi.fn(
-        (
-          _findings: readonly NormalizedCheckmateFinding[],
-          configuration: ReadonlyMap<
-            string,
-            readonly ActionableChange[]
-          > = new Map(),
-        ) =>
-          Promise.resolve(
-            buildActionCandidates(configuration).map((candidate) => ({
-              findingId: candidate.findingId,
-              actionId: candidate.actionId,
-              recommendationTitle: "Set a strong password policy",
-              whatItMeans: ["The password policy needs improvement."],
-              suggestedChanges: ["Set the password policy to Good."],
-              reason: ["This improves password strength."],
-            })),
-          ),
-      ),
-    };
     const configurationLoader = vi.fn(
       (findings: readonly NormalizedCheckmateFinding[]) =>
         Promise.resolve(
@@ -1372,8 +1269,6 @@ describe("local review UI", () => {
     const running = await startUiServer(
       { status: "failed", port: 0, outputDirectory },
       {
-        provider,
-        model: "test-model",
         env: {
           AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
           AUTH0CHECKMATE_DEV_CLIENT_ID: "scan-client",
@@ -1457,13 +1352,11 @@ describe("local review UI", () => {
       reportPath,
       JSON.stringify([{ title: "Finding", status: "red" }]),
     );
-    const provider: AiProvider = {
-      analyseFinding: vi.fn().mockRejectedValue(new Error("not called")),
-    };
-    const running = await startUiServer(
-      { report: reportPath, status: "failed", port: 0 },
-      { provider, model: "test" },
-    );
+    const running = await startUiServer({
+      report: reportPath,
+      status: "failed",
+      port: 0,
+    });
     try {
       const response = await fetch(`${running.url}/api/state`);
       expect(response.status).toBe(401);

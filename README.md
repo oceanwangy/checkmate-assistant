@@ -1,6 +1,6 @@
 # Checkmate Remediation Assistant
 
-`checkmate-assistant` is a proof-of-concept TypeScript CLI and local web interface that turns Auth0 CheckMate JSON reports into a safe, finding-driven remediation workflow. It runs CheckMate, normalises findings, verifies supported settings against the live tenant, uses OpenAI to select and explain actionable changes, and records human decisions. Tenant writes are restricted to an explicitly confirmed development execution.
+`checkmate-assistant` is a proof-of-concept TypeScript CLI and local web interface that turns Auth0 CheckMate JSON reports into a safe, finding-driven remediation workflow. It runs CheckMate, normalises findings, verifies supported settings against the live tenant, creates deterministic recommendations, and records human decisions. Tenant writes are restricted to an explicitly confirmed development execution.
 
 ## Architecture
 
@@ -15,9 +15,9 @@ Checkmate Remediation Assistant
     ↓
 Normalised findings
     ↓
-Redacted finding data → OpenAI explanation
+Live-verified deterministic recommendations
     ↓
-Human questions and decision
+Human decision and optional admin note
     ↓
 Local review record
     ↓
@@ -30,9 +30,7 @@ Terraform validation and API preflight gates
 Explicit dev API execution and verification
 ```
 
-CheckMate reports are the primary and only source of security findings. The assistant does not independently scan a tenant. Parsing, validation, filtering, child-process execution, and future change application remain deterministic application responsibilities.
-
-The AI interprets live-verified CheckMate findings and recommends supported changes. It does not generate Terraform or API requests directly. Deterministic mappings create both artifacts, and independent Terraform and Management API validators must approve them before the package is released.
+CheckMate reports are the primary and only source of security findings. The assistant does not independently invent findings or use a language model. Parsing, validation, filtering, recommendation wording, package generation, and change execution are deterministic application responsibilities. Versioned TypeScript mappings create recommendations and both deployment formats. Independent Terraform and Management API validators must approve them before the package is released.
 
 The report adapter accepts:
 
@@ -50,7 +48,6 @@ Every normalised finding retains its original `raw` object. Unknown fields are n
 - Auth0 CheckMate 1.8.3, installed automatically as a runtime dependency
 - A dedicated Auth0 Machine-to-Machine application with CheckMate's documented read scopes
 - For dev execution only: `update:connections`, `update:connections_options`, and/or `update:attack_protection`, depending on the accepted changes
-- An OpenAI API key and separately configured API billing for remediation review
 
 CheckMate is pinned in `package.json` and installed locally by `npm install`; no global npm installation or `PATH` configuration is required. See the [official Auth0 CheckMate README](https://github.com/auth0/auth0-checkmate#readme) for the current Auth0 scopes and tenant setup details. The assistant launches CheckMate's packaged entry point non-interactively using its supported environment variables.
 
@@ -64,11 +61,6 @@ cp .env.example .env
 Edit `.env` locally. Never commit it:
 
 ```dotenv
-OPENAI_API_KEY=your-openai-api-key
-OPENAI_MODEL=gpt-5.5
-OPENAI_REASONING_EFFORT=high
-OPENAI_TIMEOUT_MS=180000
-
 AUTH0CHECKMATE_PROD_DOMAIN=your-tenant.auth0.com
 AUTH0CHECKMATE_PROD_CLIENT_ID=your-client-id
 AUTH0CHECKMATE_PROD_CLIENT_SECRET=your-client-secret
@@ -83,7 +75,7 @@ AUTH0CHECKMATE_TIMEOUT_MS=300000
 
 ```
 
-`gpt-5.5` with high reasoning is the default review model. `OPENAI_MODEL` and `OPENAI_REASONING_EFFORT` can override these settings. Scan, import, and list commands do not require an OpenAI key.
+No AI service or API key is required.
 
 ## Commands
 
@@ -121,11 +113,11 @@ Start the local browser interface and run CheckMate from its start screen:
 npm run dev -- ui --profile dev --status failed
 ```
 
-Select `Run CheckMate scan`. Every UI session starts with a new scan; it does not reuse an older report. The UI runs the bundled CheckMate dependency with the selected profile, saves a new JSON file under `reports/`, and automatically begins guidance after the report is ready. Use the separate CLI `review` command when intentionally reviewing an existing report.
+Select `Run CheckMate scan`. Every UI session starts with a new scan; it does not reuse an older report. The UI runs the bundled CheckMate dependency with the selected profile, saves a new JSON file under `reports/`, and automatically prepares deterministic guidance after the report is ready.
 
 Before starting an assessment, the administrator must confirm that the development tenant mirrors production's security-relevant Auth0 configuration. Environment-specific tenant domains, resource IDs, credentials, users, logs, and customer data remain separate. This configuration baseline is required so that development validation is representative without copying production identities, secrets, or data.
 
-You can add an admin note explaining a decision, then choose `Accept AI suggestion` or `Remain unchanged` for every recommendation. Notes are optional and are stored in the local JSON audit record when provided. After all decisions are saved, select `Submit`. Both `dev` and `prod` profiles must be configured. The assistant reads each tenant independently and creates this package next to the JSON review record:
+You can add an admin note explaining a decision, then choose `Accept suggestion` or `Remain unchanged` for every recommendation. Notes are optional and are stored in the local JSON audit record when provided. After all decisions are saved, select `Submit`. Both `dev` and `prod` profiles must be configured. The assistant reads each tenant independently and creates this package next to the JSON review record:
 
 ```text
 <review>.change-package/
@@ -165,36 +157,6 @@ The modal provides `Execute changes` only when both development validations pass
 
 Compatibility-sensitive recommendations are intentionally unselected when first displayed. This includes RS256 migration, passkey enablement, callback removal, and Implicit grant removal. The administrator must select the affected applications, connections, or URLs after confirming compatibility. Cross-origin authentication remains selected by default under the current deterministic policy.
 
-Review failed findings interactively:
-
-```sh
-REPORT="$(ls -t reports/*.json | head -n 1)"
-npm run dev -- review --report "$REPORT" --profile dev --status failed
-```
-
-Start with one finding to verify API access and control cost:
-
-```sh
-npm run dev -- review --report "$REPORT" --profile dev --status failed --limit 1
-```
-
-The interactive display is concise by default. To also show the optional AI-generated `What it means` and `Why it matters` sections:
-
-```sh
-npm run dev -- review --report "$REPORT" --status failed --limit 1 --show-explanation
-```
-
-For each finding, the command:
-
-1. Shows the CheckMate title, status, severity, resource, message, and recommendation when present. Validator IDs and raw evidence stay out of the interactive display.
-2. Sends only selected, normalised, redacted fields to OpenAI—not the raw report.
-3. Prints short bullets explaining what the finding means and why it matters.
-4. Asks up to four finding-specific questions using text, single-select, or keyboard checkbox controls as appropriate.
-5. Records `approved`, `rejected`, `deferred`, `accepted_risk`, or `needs_investigation`, with a required rationale.
-6. Saves after every decision under `remediation-plans/` as a validated JSON review record.
-
-The OpenAI request uses the Responses API with strict structured output and `store: false`. User answers and decisions remain local in this milestone and are not sent back to OpenAI.
-
 Build and link the package to use the final command name:
 
 ```sh
@@ -212,7 +174,7 @@ npm test
 npm run format:check
 ```
 
-Tests mock child-process execution and the OpenAI provider. They require no Auth0 or OpenAI credentials.
+Tests mock child-process execution and Auth0 configuration reads. They require no Auth0 credentials.
 
 Generated Terraform is also checked against the provider schema during submission. The first validation may download the pinned Auth0 provider into the generated change-package directory.
 
@@ -228,11 +190,9 @@ A real report from the target tenant is still needed to confirm any tenant/versi
 
 - Scan, review, package generation, Terraform validation, and API preflight perform no Auth0 write operations. Only the explicitly confirmed dev API execution step can write.
 - Production execution is blocked.
-- OpenAI is called only by the explicit remediation-review workflow and cannot invoke CheckMate execution or Auth0 write APIs.
-- The raw CheckMate report, environment, API key, Auth0 credentials, and Management API tokens are never sent to OpenAI.
-- Only selected normalised fields are sent. Sensitive keys, known credential values, bearer values, and JWT-shaped strings are redacted.
-- OpenAI responses use a strict schema, short bullet arrays, and low verbosity. The remediation review uses no model tools.
-- Finite AI questions use select controls. The AI may only use standard yes/no/investigation choices; it cannot invent application names.
+- No report data or tenant configuration is sent to an AI service.
+- Recommendations come from versioned, testable mappings over supported CheckMate validators and narrow live Auth0 reads.
+- Unknown or unsupported settings cannot become executable recommendations through generated prose.
 - Automatic choices come from narrow, finding-triggered Auth0 reads for supported applications, database connections, and attack-protection settings. System Management API policy findings remain manual because they cannot satisfy the dual-format requirement.
 - Each stored decision references its CheckMate finding ID and preserves the available CheckMate wording.
 - No generic shell command or generic Auth0 Management API function exists.
@@ -247,7 +207,7 @@ CheckMate itself reads tenant configuration through the Auth0 Management API and
 ## Milestones
 
 1. **Milestone 1 — complete:** safe CheckMate scan, import, normalisation, and finding listing.
-2. **Milestone 2 — complete:** redacted OpenAI explanation, interactive questions, and local decision records.
+2. **Milestone 2 — complete:** deterministic remediation guidance and local administrator decision records.
 3. **Milestone 3 — complete:** generate environment-specific executable YAML API plans and official-provider Terraform configurations from accepted action-level decisions, with an in-browser review.
 4. **Milestone 4 — complete for supported actions:** validate Terraform and preflight-check API plans for both environments; require explicit confirmation, live drift checks, exact-request verification, and sequential API execution.
 5. **Milestone 5 — planned:** rerun the same CheckMate validators, record verification evidence, and test rollback.

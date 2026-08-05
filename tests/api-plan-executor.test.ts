@@ -126,41 +126,6 @@ function clientPlan(): ApiPlan {
   };
 }
 
-function resourceServerPlan(): ApiPlan {
-  return {
-    schemaVersion: 1,
-    generatedAt: "2026-08-03T10:00:00.000Z",
-    sourceReport: "/reports/report.json",
-    profile: "dev",
-    tenantDomain: "tenant.auth0.com",
-    unchangedActionIds: [],
-    alreadyCompliantActionIds: [],
-    calls: [
-      {
-        id: "api-call-1",
-        method: "PATCH",
-        endpoint: "/api/v2/resource-servers/auth0-management-api",
-        resourceType: "resource_server",
-        resourceId: "auth0-management-api",
-        resourceName: "Auth0 Management API",
-        bodyStrategy: "planned_partial",
-        actionIds: ["action-per-app"],
-        preconditions: [
-          {
-            path: "subject_type_authorization.user.policy",
-            expectedValue: "allow_all",
-          },
-        ],
-        body: {
-          subject_type_authorization: {
-            user: { policy: "require_client_grant" },
-          },
-        },
-      },
-    ],
-  };
-}
-
 describe("Auth0 API plan executor", () => {
   it("validates live API preconditions without making a PATCH request", async () => {
     const before = {
@@ -203,6 +168,49 @@ describe("Auth0 API plan executor", () => {
     expect(
       fetcher.mock.calls.some(([, request]) => request?.method === "PATCH"),
     ).toBe(false);
+  });
+
+  it("treats an absent live option as the same unset value recorded as null", async () => {
+    const unsetPolicyPlan = structuredClone(plan());
+    unsetPolicyPlan.calls[0]!.preconditions = [
+      { path: "options.passwordPolicy", expectedValue: null },
+    ];
+    unsetPolicyPlan.calls[0]!.body = {
+      options: { passwordPolicy: "good" },
+    };
+    const fetcher = vi
+      .fn<Fetcher>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "management-token" })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "con_database",
+            options: { password_history: { enable: false } },
+          }),
+        ),
+      );
+
+    const result = await validateApiPlan(unsetPolicyPlan, config, {
+      fetcher,
+      includeRequestBodies: true,
+    });
+
+    expect(result).toMatchObject({
+      valid: true,
+      calls: [
+        {
+          status: "ready",
+          requestBody: {
+            options: {
+              passwordPolicy: "good",
+              password_history: { enable: false },
+            },
+          },
+        },
+      ],
+    });
   });
 
   it("retries a rate-limited live preflight read", async () => {
@@ -902,48 +910,6 @@ describe("Auth0 API plan executor", () => {
         passwordPolicy: "fair",
         password_history: { enable: false },
         requires_username: false,
-      },
-    });
-  });
-
-  it("omits the system-managed client policy when updating Management API user access", async () => {
-    const before = {
-      id: "auth0-management-api",
-      name: "Auth0 Management API",
-      subject_type_authorization: {
-        user: { policy: "allow_all" },
-        client: { policy: "require_client_grant" },
-      },
-    };
-    const after = {
-      ...before,
-      subject_type_authorization: {
-        ...before.subject_type_authorization,
-        user: { policy: "require_client_grant" },
-      },
-    };
-    const fetcher = vi
-      .fn<Fetcher>()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ access_token: "management-token" })),
-      )
-      .mockResolvedValueOnce(new Response(JSON.stringify(before)))
-      .mockResolvedValueOnce(new Response(JSON.stringify(after)))
-      .mockResolvedValueOnce(new Response(JSON.stringify(after)));
-
-    const result = await executeApiPlan(resourceServerPlan(), config, {
-      fetcher,
-    });
-
-    expect(result.status).toBe("succeeded");
-    const tokenBody = JSON.parse(
-      fetcher.mock.calls[0]?.[1]?.body as string,
-    ) as { scope: string };
-    expect(tokenBody.scope).toContain("read:resource_servers");
-    expect(tokenBody.scope).toContain("update:resource_servers");
-    expect(JSON.parse(fetcher.mock.calls[2]?.[1]?.body as string)).toEqual({
-      subject_type_authorization: {
-        user: { policy: "require_client_grant" },
       },
     });
   });

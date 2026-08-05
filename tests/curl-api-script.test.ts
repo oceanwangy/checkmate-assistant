@@ -81,13 +81,13 @@ describe("generated curl API scripts", () => {
       options: {
         password_history: { enable: false, size: 5 },
         requires_username: false,
-        passwordPolicy: null,
       },
     };
     const expectedBody = {
       options: {
         password_history: { enable: true, size: 5 },
         requires_username: false,
+        passwordPolicy: "good",
       },
     };
     const after = { ...before, options: expectedBody.options };
@@ -139,6 +139,14 @@ fi
     await chmod(fakeCurl, 0o700);
 
     const call = connectionCall();
+    call.preconditions.push({
+      path: "options.passwordPolicy",
+      expectedValue: null,
+    });
+    call.body.options = {
+      ...(call.body.options as Record<string, unknown>),
+      passwordPolicy: "good",
+    };
     const digest = apiRequestSha256(call.method, call.endpoint, expectedBody);
     const generated = buildCurlApiScript(
       "dev",

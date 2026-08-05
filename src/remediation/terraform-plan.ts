@@ -309,21 +309,14 @@ function callCoverage(call: ApiPlanCall): {
             "The Auth0 provider has no safe mapping for one or more connection fields.",
         };
   }
-  if (call.resourceType === "attack_protection") {
-    const managed = paths.every((configPath) => ATTACK_PATHS.has(configPath));
-    return managed
-      ? { managed }
-      : {
-          managed,
-          reason:
-            "The Auth0 provider has no safe mapping for one or more attack-protection fields.",
-        };
-  }
-  return {
-    managed: false,
-    reason:
-      "The Auth0 Management API is a system resource and the official provider does not support modifying system resource servers.",
-  };
+  const managed = paths.every((configPath) => ATTACK_PATHS.has(configPath));
+  return managed
+    ? { managed }
+    : {
+        managed,
+        reason:
+          "The Auth0 provider has no safe mapping for one or more attack-protection fields.",
+      };
 }
 
 export function terraformCoverage(plan: ApiPlan): TerraformCoverage {
@@ -672,7 +665,3 @@ output "checkmate_deployment" {
 }
 `;
 }
-
-// Kept as a compatibility alias for callers outside this package.
-export const buildTerraformReviewConfiguration =
-  buildTerraformDeploymentConfiguration;

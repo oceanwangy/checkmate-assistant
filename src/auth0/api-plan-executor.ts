@@ -199,6 +199,12 @@ function valueAt(source: unknown, dottedPath: string): unknown {
 }
 
 function sameValue(left: unknown, right: unknown): boolean {
+  if (
+    (left === null || left === undefined) &&
+    (right === null || right === undefined)
+  ) {
+    return true;
+  }
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
@@ -333,14 +339,6 @@ function requestBody(
   call: ApiPlanCall,
   live: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (
-    call.resourceType === "resource_server" ||
-    call.bodyStrategy === "planned_partial"
-  ) {
-    const body = cloneRecord(call.body);
-    assertJsonPayload(body);
-    return body;
-  }
   if (call.bodyStrategy === "merge_live_nested_objects") {
     const body: Record<string, unknown> = {};
     for (const [key, planned] of Object.entries(call.body)) {
@@ -390,9 +388,6 @@ function scopesFor(
   const attack = plan.calls.some(
     (call) => call.resourceType === "attack_protection",
   );
-  const resourceServer = plan.calls.some(
-    (call) => call.resourceType === "resource_server",
-  );
   return [
     ...(client
       ? ["read:clients", ...(mode === "read_write" ? ["update:clients"] : [])]
@@ -410,12 +405,6 @@ function scopesFor(
       ? [
           "read:attack_protection",
           ...(mode === "read_write" ? ["update:attack_protection"] : []),
-        ]
-      : []),
-    ...(resourceServer
-      ? [
-          "read:resource_servers",
-          ...(mode === "read_write" ? ["update:resource_servers"] : []),
         ]
       : []),
   ];

@@ -19,8 +19,6 @@
     "build:core": "npm run build --workspace @checkmate-assistant/core",
     "predev": "npm run build:core",
     "dev": "tsx src/cli.ts",
-    "preeval:prompts": "npm run build:core",
-    "eval:prompts": "tsx src/evaluation/evaluate-report-prompts.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -31,10 +29,8 @@
   },
   "dependencies": {
     "@auth0/auth0-checkmate": "1.8.3",
-    "@inquirer/prompts": "7.10.1",
     "commander": "^14.0.0",
     "dotenv": "^17.0.0",
-    "openai": "^5.0.0",
     "yaml": "^2.8.0",
     "zod": "^3.25.0"
   },

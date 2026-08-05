@@ -14,7 +14,6 @@ import { finalizeValidatedApiPlan } from "../src/remediation/validated-api-plan.
 const analysis = {
   whatItMeans: ["The current setting needs improvement."],
   whyItMatters: ["The proposed setting reduces risk."],
-  questions: [],
   remediationConsiderations: ["Apply the proposed setting."],
 };
 
@@ -23,7 +22,7 @@ function session(): ReviewSession {
     schemaVersion: 1,
     report: { sourceReport: "/reports/tenant-report.json" },
     review: {
-      model: "gpt-test",
+      guidanceEngine: "deterministic-test",
       startedAt: "2026-07-10T10:00:00.000Z",
       lastUpdatedAt: "2026-07-10T10:05:00.000Z",
       completedAt: "2026-07-10T10:05:00.000Z",
@@ -34,7 +33,6 @@ function session(): ReviewSession {
         checkmateTitle: "Password policy",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-policy",
         actionableChanges: [
           {
@@ -57,7 +55,6 @@ function session(): ReviewSession {
         checkmateTitle: "Password history",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-history",
         actionableChanges: [
           {
@@ -80,7 +77,6 @@ function session(): ReviewSession {
         checkmateTitle: "Passkeys",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-passkey",
         actionableChanges: [
           {
@@ -211,7 +207,6 @@ describe("Auth0 API plan", () => {
         checkmateTitle: "Application grant types",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-implicit",
         actionableChanges: [
           {
@@ -243,50 +238,6 @@ describe("Auth0 API plan", () => {
     ]);
   });
 
-  it("creates a resource-server PATCH for the selected user-access policy", () => {
-    const review = session();
-    review.decisions = [
-      {
-        checkmateFindingId: "management-api-user-access",
-        checkmateTitle: "Management API user access",
-        checkmateStatus: "failed",
-        analysis,
-        answers: [],
-        actionableChangeId: "action-per-app",
-        actionableChanges: [
-          {
-            resourceType: "resource_server",
-            resourceId: "auth0-management-api",
-            resourceName: "Auth0 Management API",
-            configPath: "subject_type_authorization.user.policy",
-            currentValue: "allow_all",
-            targetValue: "require_client_grant",
-          },
-        ],
-        decision: {
-          status: "approved",
-          rationale: "Require explicit application grants.",
-          decidedAt: "2026-08-03T10:05:00.000Z",
-        },
-      },
-    ];
-
-    const plan = buildApiPlan(review, "dev", "2026-08-03T10:06:00.000Z");
-
-    expect(plan.calls).toEqual([
-      expect.objectContaining({
-        endpoint: "/api/v2/resource-servers/auth0-management-api",
-        resourceType: "resource_server",
-        bodyStrategy: "planned_partial",
-        body: {
-          subject_type_authorization: {
-            user: { policy: "require_client_grant" },
-          },
-        },
-      }),
-    ]);
-  });
-
   it("merges selected callback removals into one client PATCH", () => {
     const review = session();
     const currentCallbacks = [
@@ -300,7 +251,6 @@ describe("Auth0 API plan", () => {
         checkmateTitle: "Application Allowed Callbacks",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-callback-3000",
         actionableChanges: [
           {
@@ -325,7 +275,6 @@ describe("Auth0 API plan", () => {
         checkmateTitle: "Application Allowed Callbacks",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-callback-4000",
         actionableChanges: [
           {

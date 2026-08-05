@@ -7,18 +7,12 @@ const apiCallSchema = z.object({
   id: z.string().min(1),
   method: z.literal("PATCH"),
   endpoint: z.string().startsWith("/api/v2/"),
-  resourceType: z.enum([
-    "connection",
-    "attack_protection",
-    "client",
-    "resource_server",
-  ]),
+  resourceType: z.enum(["connection", "attack_protection", "client"]),
   resourceId: z.string().min(1),
   resourceName: z.string().min(1),
   bodyStrategy: z.enum([
     "merge_live_connection_options",
     "merge_live_nested_objects",
-    "planned_partial",
   ]),
   actionIds: z.array(z.string().min(1)).min(1),
   preconditions: z.array(
@@ -57,9 +51,6 @@ export type ApiPlan = z.infer<typeof apiPlanSchema>;
 export type ApiPlanCall = z.infer<typeof apiCallSchema>;
 
 function endpointFor(change: ActionableChange): string {
-  if (change.resourceType === "resource_server") {
-    return `/api/v2/resource-servers/${encodeURIComponent(change.resourceId)}`;
-  }
   if (change.resourceType === "client") {
     return `/api/v2/clients/${encodeURIComponent(change.resourceId)}`;
   }
@@ -169,9 +160,7 @@ function callsForActions(
         bodyStrategy:
           change.resourceType === "connection"
             ? "merge_live_connection_options"
-            : change.resourceType === "resource_server"
-              ? "planned_partial"
-              : "merge_live_nested_objects",
+            : "merge_live_nested_objects",
         actionIds: [],
         preconditions: [],
         body: {},

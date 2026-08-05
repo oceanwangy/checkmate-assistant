@@ -47,7 +47,7 @@ function renderProgress() {
       ? "Ready to scan"
       : ui.state.triaged
         ? `${completed} of ${total} reviewed`
-        : `AI interpreting ${findingScope()}`;
+        : `Preparing recommendations for ${findingScope()}`;
   byId("progress-bar").style.width =
     `${total ? (completed / total) * 100 : 0}%`;
 }
@@ -80,7 +80,7 @@ function renderStartPage() {
     node(
       "p",
       "scan-intro",
-      "CheckMate reads the Auth0 tenant configuration and creates a JSON security report. AI guidance starts after the report is ready.",
+      "CheckMate reads the Auth0 tenant configuration and creates a JSON security report. Deterministic remediation guidance starts after the report is ready.",
     ),
   );
   const prerequisite = node("section", "scan-prerequisite");
@@ -144,7 +144,7 @@ function renderStartPage() {
         body: JSON.stringify({ profile }),
       });
       ui.state = result.state;
-      toast("CheckMate report created. Starting AI guidance.");
+      toast("CheckMate report created. Preparing recommendations.");
       await runTriage();
     } catch (error) {
       ui.state.scanning = false;
@@ -677,11 +677,9 @@ function renderDecisionOptions(finding, adminNotes, selectionCheckboxes = []) {
         ? "Accept for selected applications"
         : finding.selectionMode === "connections"
           ? "Accept for selected connections"
-          : finding.selectionMode === "alternatives"
-            ? "Accept selected policy"
-            : finding.selectionMode === "changes"
-              ? "Accept selected removals"
-              : "Accept AI suggestion",
+          : finding.selectionMode === "changes"
+            ? "Accept selected removals"
+            : "Accept suggestion",
   );
   const unchanged = node(
     "button",
@@ -703,9 +701,7 @@ function renderDecisionOptions(finding, adminNotes, selectionCheckboxes = []) {
           ? "Select at least one application, or remain unchanged."
           : finding.selectionMode === "connections"
             ? "Select at least one connection, or remain unchanged."
-            : finding.selectionMode === "alternatives"
-              ? "Select an access policy, or remain unchanged."
-              : "Select at least one callback URL, or remain unchanged.",
+            : "Select at least one callback URL, or remain unchanged.",
         true,
       );
       return;
@@ -763,15 +759,7 @@ function createFindingCard(finding, index) {
   }
 
   const suggestion = node("section", "suggestion");
-  suggestion.append(
-    node(
-      "h3",
-      "",
-      finding.selectionMode === "single"
-        ? "AI-suggested changes"
-        : "Recommended security change",
-    ),
-  );
+  suggestion.append(node("h3", "", "Recommended security change"));
   addBulletList(suggestion, finding.analysis.remediationConsiderations);
   const reason = node("div", "reason");
   reason.append(node("strong", "", "Why this matters"));
@@ -781,7 +769,6 @@ function createFindingCard(finding, index) {
   if (
     finding.selectionMode === "applications" ||
     finding.selectionMode === "connections" ||
-    finding.selectionMode === "alternatives" ||
     finding.selectionMode === "changes"
   ) {
     const applications = node("fieldset", "application-selection");
@@ -796,9 +783,7 @@ function createFindingCard(finding, index) {
           ? "Select applications"
           : finding.selectionMode === "connections"
             ? "Select connections"
-            : finding.selectionMode === "alternatives"
-              ? "Select user access policy"
-              : "Select callback URLs",
+            : "Select callback URLs",
       ),
     );
     const selected = new Set(finding.selectedActionIds || []);
@@ -810,7 +795,6 @@ function createFindingCard(finding, index) {
         ) {
           return left.resourceName.localeCompare(right.resourceName);
         }
-        if (finding.selectionMode === "alternatives") return 0;
         return removedCallbackUrl(left).localeCompare(
           removedCallbackUrl(right),
         );
@@ -819,25 +803,14 @@ function createFindingCard(finding, index) {
     for (const change of selectableChanges) {
       const label = node("label", "application-option");
       const checkbox = document.createElement("input");
-      checkbox.type =
-        finding.selectionMode === "alternatives" ? "radio" : "checkbox";
-      if (finding.selectionMode === "alternatives") {
-        checkbox.name = `policy-${finding.key}`;
-      }
+      checkbox.type = "checkbox";
       checkbox.value = change.actionId;
       checkbox.checked = finding.reviewed
         ? selected.has(change.actionId)
-        : finding.selectionMode === "alternatives"
-          ? change === selectableChanges[0]
-          : finding.defaultSelected !== false;
+        : finding.defaultSelected !== false;
       selectionCheckboxes.push(checkbox);
       const text = node("span", "application-option-text");
-      if (finding.selectionMode === "alternatives") {
-        text.append(
-          node("strong", "", change.optionLabel),
-          node("small", "", change.optionDescription),
-        );
-      } else if (finding.selectionMode === "changes") {
+      if (finding.selectionMode === "changes") {
         const callbackUrl = removedCallbackUrl(change);
         text.append(
           node("strong", "", callbackLabel(callbackUrl)),
@@ -1003,7 +976,7 @@ function renderTriageLoading() {
   const page = node("section", "triage-page");
   page.append(
     node("div", "spinner", ""),
-    node("h1", "", "AI is interpreting your CheckMate report"),
+    node("h1", "", "Preparing CheckMate remediation guidance"),
     node(
       "p",
       "",
@@ -1167,12 +1140,12 @@ function renderPage() {
   ui.cards.clear();
   const intro = node("section", "page-intro");
   intro.append(
-    node("div", "eyebrow", "AI remediation guidance"),
+    node("div", "eyebrow", "CheckMate remediation guidance"),
     node("h1", "", `${ui.state.findings.length} recommended changes`),
     node(
       "p",
       "",
-      `AI reviewed ${findingScope()}. Supported recommendations were verified against your tenant's current configuration.`,
+      `The application evaluated ${findingScope()}. Supported recommendations were verified against your tenant's current configuration.`,
     ),
   );
   const scanAgain = node("button", "scan-again-button", "Run new scan");
@@ -1187,7 +1160,7 @@ function renderPage() {
       node(
         "p",
         "",
-        "The report needs more tenant or business context before AI can recommend a specific configuration change.",
+        "The report contains no supported automatic change for these findings. Review the remaining controls manually.",
       ),
     );
     list.append(empty);
@@ -1220,7 +1193,7 @@ async function runTriage() {
   } catch (error) {
     const page = node("section", "error-page");
     page.append(
-      node("h1", "", "AI triage could not be completed"),
+      node("h1", "", "Recommendations could not be prepared"),
       node("p", "", error.message),
     );
     const retry = node("button", "decision unchanged", "Try again");

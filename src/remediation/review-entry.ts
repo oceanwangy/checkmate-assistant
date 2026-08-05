@@ -1,30 +1,9 @@
-import type { AiFindingAnalysis } from "../ai/provider.js";
 import type { NormalizedCheckmateFinding } from "../findings/types.js";
 import { redactText } from "../security/redaction.js";
 import type { RemediationDecisionStatus } from "./plan-schema.js";
-import type { ReviewAnswer, ReviewEntry } from "./review-schema.js";
+import type { ReviewEntry } from "./review-schema.js";
 import type { ActionableChange } from "./actionable-change.js";
-
-export function redactAnalysis(
-  analysis: AiFindingAnalysis,
-  sensitiveValues: readonly string[],
-): AiFindingAnalysis {
-  const clean = (items: readonly string[]) =>
-    items.map((item) => redactText(item, sensitiveValues));
-  return {
-    whatItMeans: clean(analysis.whatItMeans),
-    whyItMatters: clean(analysis.whyItMatters),
-    questions: analysis.questions.map((question) => ({
-      ...question,
-      prompt: redactText(question.prompt, sensitiveValues),
-      options: question.options.map((option) => ({
-        value: redactText(option.value, sensitiveValues),
-        label: redactText(option.label, sensitiveValues),
-      })),
-    })),
-    remediationConsiderations: clean(analysis.remediationConsiderations),
-  };
-}
+import type { RecommendationAnalysis } from "./deterministic-guidance.js";
 
 export function boundedUserText(
   value: string,
@@ -33,19 +12,9 @@ export function boundedUserText(
   return redactText(value, sensitiveValues).slice(0, 4_000);
 }
 
-export function boundedAnswer(
-  value: string | string[],
-  sensitiveValues: readonly string[],
-): string | string[] {
-  return Array.isArray(value)
-    ? value.map((item) => redactText(item, sensitiveValues).slice(0, 200))
-    : boundedUserText(value, sensitiveValues);
-}
-
 export function createReviewEntry(
   finding: NormalizedCheckmateFinding,
-  analysis: AiFindingAnalysis,
-  answers: ReviewAnswer[],
+  analysis: RecommendationAnalysis,
   decision: RemediationDecisionStatus,
   rationale: string,
   decidedAt: string,
@@ -57,7 +26,6 @@ export function createReviewEntry(
     checkmateTitle: redactText(finding.title, sensitiveValues),
     checkmateStatus: finding.status,
     analysis,
-    answers,
     decision: {
       status: decision,
       rationale: boundedUserText(rationale, sensitiveValues),

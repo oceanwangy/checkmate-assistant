@@ -9,7 +9,6 @@ import type { ReviewSession } from "../src/remediation/review-schema.js";
 const analysis = {
   whatItMeans: ["The current setting needs improvement."],
   whyItMatters: ["The proposed setting reduces risk."],
-  questions: [],
   remediationConsiderations: ["Apply the proposed setting."],
 };
 
@@ -24,7 +23,6 @@ function reviewSession(): ReviewSession {
     checkmateTitle: id,
     checkmateStatus: "failed",
     analysis,
-    answers: [],
     actionableChangeId: `action-${id}`,
     actionableChanges: [
       {
@@ -46,7 +44,7 @@ function reviewSession(): ReviewSession {
     schemaVersion: 1,
     report: { sourceReport: "/reports/dev.json" },
     review: {
-      model: "test",
+      guidanceEngine: "deterministic-test",
       startedAt: "2026-07-14T00:00:00.000Z",
       lastUpdatedAt: "2026-07-14T01:00:00.000Z",
       completedAt: "2026-07-14T01:00:00.000Z",
@@ -129,7 +127,6 @@ describe("profile API plans", () => {
         checkmateTitle: "Application grant types",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-implicit",
         actionableChanges: [
           {

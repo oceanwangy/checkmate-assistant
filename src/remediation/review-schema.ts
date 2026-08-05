@@ -1,17 +1,7 @@
 import { z } from "zod";
-import { aiFindingAnalysisSchema } from "../ai/provider.js";
 import { remediationDecisionStatusSchema } from "./plan-schema.js";
 import { actionableChangeSchema } from "./actionable-change.js";
-
-export const reviewAnswerSchema = z.object({
-  questionId: z.string().min(1).max(80),
-  prompt: z.string().min(1).max(220),
-  inputType: z.enum(["text", "single_select", "multi_select"]),
-  answer: z.union([
-    z.string().max(4_000),
-    z.array(z.string().max(200)).max(1_000),
-  ]),
-});
+import { recommendationAnalysisSchema } from "./deterministic-guidance.js";
 
 export const reviewEntrySchema = z.object({
   checkmateFindingId: z.string().min(1),
@@ -21,8 +11,7 @@ export const reviewEntrySchema = z.object({
   checkmateStatus: z.enum(["passed", "failed", "warning", "unknown"]),
   checkmateMessage: z.string().optional(),
   checkmateRecommendation: z.string().optional(),
-  analysis: aiFindingAnalysisSchema,
-  answers: z.array(reviewAnswerSchema),
+  analysis: recommendationAnalysisSchema,
   actionableChanges: z.array(actionableChangeSchema).optional(),
   decision: z.object({
     status: remediationDecisionStatusSchema,
@@ -72,7 +61,7 @@ export const reviewSessionSchema = z.object({
     reportTimestamp: z.string().optional(),
   }),
   review: z.object({
-    model: z.string().min(1),
+    guidanceEngine: z.string().min(1),
     startedAt: z.string().datetime(),
     lastUpdatedAt: z.string().datetime(),
     completedAt: z.string().datetime().optional(),
@@ -82,6 +71,5 @@ export const reviewSessionSchema = z.object({
   executionHistory: z.array(executionRecordSchema).optional(),
 });
 
-export type ReviewAnswer = z.infer<typeof reviewAnswerSchema>;
 export type ReviewEntry = z.infer<typeof reviewEntrySchema>;
 export type ReviewSession = z.infer<typeof reviewSessionSchema>;

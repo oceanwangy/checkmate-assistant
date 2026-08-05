@@ -55,27 +55,6 @@ function plan(): ApiPlan {
         ],
         body: { grant_types: ["authorization_code"] },
       },
-      {
-        id: "api-call-3",
-        method: "PATCH",
-        endpoint: "/api/v2/resource-servers/auth0-management-api",
-        resourceType: "resource_server",
-        resourceId: "auth0-management-api",
-        resourceName: "Auth0 Management API",
-        bodyStrategy: "planned_partial",
-        actionIds: ["action-user-access"],
-        preconditions: [
-          {
-            path: "subject_type_authorization.user.policy",
-            expectedValue: "allow_all",
-          },
-        ],
-        body: {
-          subject_type_authorization: {
-            user: { policy: "require_client_grant" },
-          },
-        },
-      },
     ],
   };
 }
@@ -97,22 +76,14 @@ describe("Terraform deployment output", () => {
     expect(terraform).toContain('grant_types       = ["authorization_code"]');
     expect(terraform).toContain("password_history {");
     expect(terraform).toContain("options[0].password_history[0].size");
-    expect(terraform).not.toContain('resource "auth0_resource_server"');
-    expect(terraform).toContain('api_only_call_ids          = ["api-call-3"]');
+    expect(terraform).toContain("api_only_call_ids          = []");
     expect(terraform).not.toContain("/private/reports");
   });
 
-  it("reports official-provider coverage without treating the system Management API as managed", () => {
+  it("reports official-provider coverage for every supported call", () => {
     expect(terraformCoverage(plan())).toEqual({
       managedCallIds: ["api-call-1", "api-call-2"],
-      apiOnlyCalls: [
-        {
-          id: "api-call-3",
-          resourceName: "Auth0 Management API",
-          reason:
-            "The Auth0 Management API is a system resource and the official provider does not support modifying system resource servers.",
-        },
-      ],
+      apiOnlyCalls: [],
     });
   });
 

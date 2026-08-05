@@ -4,13 +4,6 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type {
-  AiFindingAnalysis,
-  AiProvider,
-  AiReportTriageItem,
-} from "../ai/provider.js";
-import { collectSensitiveEnvironmentValues } from "../ai/finding-payload.js";
-import { OpenAiProvider } from "../ai/openai-provider.js";
 import {
   loadActionableConfiguration,
   type ActionableConfigurationMap,
@@ -28,7 +21,6 @@ import {
 } from "../auth0/production-credential-access.js";
 import { loadCheckmateReport } from "../checkmate/report-loader.js";
 import { executeScan } from "../commands/scan.js";
-import { loadAiConfig } from "../config/ai.js";
 import { loadCheckmateConfig, type CheckmateConfig } from "../config/env.js";
 import { profiles, type ProfileName } from "../config/profiles.js";
 import { resolveReviewProfile } from "../config/review-profile.js";
@@ -37,8 +29,11 @@ import {
   type FindingStatusFilter,
 } from "../findings/filter.js";
 import type { NormalizedCheckmateFinding } from "../findings/types.js";
-import type { ActionableChange } from "../remediation/actionable-change.js";
-import { buildActionCandidates } from "../remediation/action-candidates.js";
+import {
+  buildDeterministicRecommendations,
+  DETERMINISTIC_GUIDANCE_ENGINE,
+  type DeterministicRecommendation,
+} from "../remediation/deterministic-guidance.js";
 import type { ApiPlan } from "../remediation/api-plan.js";
 import { readApiPlan, writeApiPlan } from "../remediation/api-plan-writer.js";
 import {
@@ -62,6 +57,7 @@ import {
   type TerraformValidationResult,
 } from "../remediation/terraform-validator.js";
 import { redactText } from "../security/redaction.js";
+import { collectSensitiveEnvironmentValues } from "../security/sensitive-values.js";
 import {
   boundedUserText,
   createReviewEntry,
@@ -115,8 +111,6 @@ export interface UiServerOptions {
 
 export interface UiServerDependencies {
   env?: NodeJS.ProcessEnv;
-  provider?: AiProvider;
-  model?: string;
   now?: () => Date;
   configurationLoader?: typeof loadActionableConfiguration;
   planExecutor?: typeof executeApiPlan;
@@ -131,26 +125,6 @@ export interface RunningUiServer {
   url: string;
   outputPath: string;
   close(): Promise<void>;
-}
-
-interface CachedFinding {
-  finding: NormalizedCheckmateFinding;
-}
-
-interface CachedRecommendation {
-  key: string;
-  title: string;
-  analysis: AiFindingAnalysis;
-  selectionMode:
-    "single" | "applications" | "connections" | "alternatives" | "changes";
-  defaultSelected: boolean;
-  actions: Array<{
-    actionId: string;
-    finding: NormalizedCheckmateFinding;
-    actionableChange: ActionableChange;
-    optionLabel?: string;
-    optionDescription?: string;
-  }>;
 }
 
 interface EnvironmentChangePackage {
@@ -168,99 +142,6 @@ interface SubmittedChangePackage {
   prod: EnvironmentChangePackage;
   prodCredentialAccess: ProductionCredentialAccessResult;
 }
-
-const deterministicApplicationGroups = [
-  {
-    key: "applications-remove-implicit",
-    configPath: "grant_types",
-    title: "Remove the Implicit grant type from",
-    whatItMeans: [
-      "These applications currently allow the Implicit grant type.",
-    ],
-    suggestion: "Remove the Implicit grant type from selected applications.",
-    reason: [
-      "This prevents tokens from being returned directly through the browser flow.",
-      "Other configured grant types remain unchanged.",
-    ],
-    defaultSelected: false,
-  },
-  {
-    key: "applications-use-rs256",
-    configPath: "jwt_configuration.alg",
-    title: "Set JWT signing to RS256",
-    whatItMeans: ["These applications are not using RS256 for JWT signing."],
-    suggestion: "Set JWT signing to RS256 for selected applications.",
-    reason: [
-      "RS256 uses asymmetric signing and keeps verification separate from signing.",
-      "Other JWT settings remain unchanged.",
-    ],
-    defaultSelected: false,
-  },
-  {
-    key: "applications-disable-cross-origin",
-    configPath: "cross_origin_authentication",
-    title: "Disable cross-origin authentication for",
-    whatItMeans: [
-      "These applications currently allow cross-origin authentication.",
-    ],
-    suggestion:
-      "Disable cross-origin authentication for selected applications.",
-    reason: [
-      "This removes an unnecessary browser-based authentication surface.",
-      "Cross-origin authentication should be disabled.",
-    ],
-    defaultSelected: true,
-  },
-] as const;
-
-const deterministicConnectionGroups = [
-  {
-    key: "connections-enable-password-history",
-    validatorId: "checkPasswordHistory",
-    configPath: "options.password_history.enable",
-    title: "Enable password history",
-    whatItMeans: [
-      "These database connections currently allow users to reuse previous passwords.",
-    ],
-    suggestion: "Enable password history for selected database connections.",
-    reason: [
-      "Password history prevents users from reusing recently used passwords.",
-      "Other database connection settings remain unchanged.",
-    ],
-    defaultSelected: true,
-  },
-  {
-    key: "connections-block-personal-information",
-    validatorId: "checkPasswordNoPersonalInfo",
-    configPath: "options.password_no_personal_info.enable",
-    title: "Block personal information",
-    whatItMeans: [
-      "These database connections currently allow personal information in passwords.",
-    ],
-    suggestion:
-      "Block personal information in passwords for selected database connections.",
-    reason: [
-      "Personal information can make passwords easier to guess.",
-      "Other database connection settings remain unchanged.",
-    ],
-    defaultSelected: true,
-  },
-  {
-    key: "connections-enable-passkeys",
-    validatorId: "checkAuthenticationMethods",
-    configPath: "options.authentication_methods.passkey.enabled",
-    title: "Enable passkeys",
-    whatItMeans: [
-      "These database connections currently use passwords without passkeys as an authentication option.",
-    ],
-    suggestion: "Enable passkeys for selected database connections.",
-    reason: [
-      "Passkeys provide a phishing-resistant alternative to passwords.",
-      "Passkey prerequisites must be validated before the change is executed.",
-    ],
-    defaultSelected: false,
-  },
-] as const;
 
 function securityHeaders(response: ServerResponse): void {
   response.setHeader(
@@ -338,32 +219,17 @@ export async function startUiServer(
 ): Promise<RunningUiServer> {
   const env = dependencies.env ?? process.env;
   const sensitiveValues = collectSensitiveEnvironmentValues(env);
-  let model = dependencies.model;
-  let provider = dependencies.provider;
-  if (!provider) {
-    const config = loadAiConfig(env);
-    model = config.model;
-    provider = new OpenAiProvider({
-      apiKey: config.apiKey,
-      model: config.model,
-      timeoutMs: config.timeoutMs,
-      reasoningEffort: config.reasoningEffort,
-      sensitiveValues,
-    });
-  }
-  model ??= "injected-test-provider";
   const now = dependencies.now ?? (() => new Date());
   const token = randomBytes(32);
   let report: Awaited<ReturnType<typeof loadCheckmateReport>> | undefined;
   let findings: NormalizedCheckmateFinding[] = [];
-  let cachedFindings: CachedFinding[] = [];
   let reportValidatorCount = 0;
   let profile: CheckmateConfig | undefined;
   let outputPath: string | undefined;
   let session: ReviewSession | undefined;
   let triaged = false;
-  let recommendations: CachedRecommendation[] = [];
-  const recommendationMap = new Map<string, CachedRecommendation>();
+  let recommendations: DeterministicRecommendation[] = [];
+  const recommendationMap = new Map<string, DeterministicRecommendation>();
   let triagePromise: Promise<void> | undefined;
   let submittedPackage: SubmittedChangePackage | undefined;
   let execution: ApiExecutionResult | undefined;
@@ -399,7 +265,7 @@ export async function startUiServer(
       schemaVersion: 1,
       report: { sourceReport: loaded.sourcePath },
       review: {
-        model,
+        guidanceEngine: DETERMINISTIC_GUIDANCE_ENGINE,
         startedAt: startedAt.toISOString(),
         lastUpdatedAt: startedAt.toISOString(),
       },
@@ -411,7 +277,6 @@ export async function startUiServer(
     }
     report = loaded;
     findings = selectedFindings;
-    cachedFindings = findings.map((finding) => ({ finding }));
     reportValidatorCount = new Set(
       loaded.findings.map((finding) => finding.validatorId ?? finding.id),
     ).size;
@@ -536,189 +401,6 @@ export async function startUiServer(
     }
   };
 
-  const applyTriage = (
-    items: readonly AiReportTriageItem[],
-    configuration: ActionableConfigurationMap,
-  ): void => {
-    recommendations = [];
-    recommendationMap.clear();
-    const actionMap = new Map(
-      buildActionCandidates(configuration).map((candidate) => [
-        candidate.actionId,
-        candidate,
-      ]),
-    );
-    const deterministicActionIds = new Set<string>();
-    for (const group of deterministicApplicationGroups) {
-      const actions = [...actionMap.values()].flatMap((candidate) => {
-        if (
-          candidate.change.resourceType !== "client" ||
-          candidate.change.configPath !== group.configPath
-        ) {
-          return [];
-        }
-        const item = cachedFindings.find(
-          ({ finding }) => finding.id === candidate.findingId,
-        );
-        if (!item) return [];
-        deterministicActionIds.add(candidate.actionId);
-        return [
-          {
-            actionId: candidate.actionId,
-            finding: item.finding,
-            actionableChange: candidate.change,
-          },
-        ];
-      });
-      if (actions.length === 0) continue;
-      const recommendation: CachedRecommendation = {
-        key: group.key,
-        title: group.title,
-        selectionMode: "applications",
-        defaultSelected: group.defaultSelected,
-        actions,
-        analysis: {
-          whatItMeans: [...group.whatItMeans],
-          whyItMatters: [...group.reason],
-          questions: [],
-          remediationConsiderations: [group.suggestion],
-        },
-      };
-      recommendations.push(recommendation);
-      recommendationMap.set(recommendation.key, recommendation);
-    }
-    for (const group of deterministicConnectionGroups) {
-      const actions = [...actionMap.values()].flatMap((candidate) => {
-        if (
-          candidate.change.resourceType !== "connection" ||
-          candidate.change.configPath !== group.configPath
-        ) {
-          return [];
-        }
-        const item = cachedFindings.find(
-          ({ finding }) =>
-            finding.id === candidate.findingId &&
-            finding.validatorId === group.validatorId,
-        );
-        if (!item) return [];
-        deterministicActionIds.add(candidate.actionId);
-        return [
-          {
-            actionId: candidate.actionId,
-            finding: item.finding,
-            actionableChange: candidate.change,
-          },
-        ];
-      });
-      if (actions.length === 0) continue;
-      const recommendation: CachedRecommendation = {
-        key: group.key,
-        title: group.title,
-        selectionMode: "connections",
-        defaultSelected: group.defaultSelected,
-        actions,
-        analysis: {
-          whatItMeans: [...group.whatItMeans],
-          whyItMatters: [...group.reason],
-          questions: [],
-          remediationConsiderations: [group.suggestion],
-        },
-      };
-      recommendations.push(recommendation);
-      recommendationMap.set(recommendation.key, recommendation);
-    }
-    const callbackActions = [...actionMap.values()].flatMap((candidate) => {
-      if (
-        candidate.change.resourceType !== "client" ||
-        candidate.change.configPath !== "callbacks"
-      ) {
-        return [];
-      }
-      const item = cachedFindings.find(
-        ({ finding }) => finding.id === candidate.findingId,
-      );
-      if (!item) return [];
-      deterministicActionIds.add(candidate.actionId);
-      return [
-        {
-          actionId: candidate.actionId,
-          finding: item.finding,
-          actionableChange: candidate.change,
-        },
-      ];
-    });
-    const callbacksByClient = new Map<string, typeof callbackActions>();
-    for (const action of callbackActions) {
-      const resourceId = action.actionableChange.resourceId;
-      const grouped = callbacksByClient.get(resourceId) ?? [];
-      grouped.push(action);
-      callbacksByClient.set(resourceId, grouped);
-    }
-    for (const actions of callbacksByClient.values()) {
-      const first = actions[0];
-      if (!first) continue;
-      const resourceName = first.actionableChange.resourceName;
-      const recommendation: CachedRecommendation = {
-        key: `callbacks-${first.actionId}`,
-        title: `Remove insecure callback URLs from ${resourceName}`,
-        selectionMode: "changes",
-        defaultSelected: false,
-        actions,
-        analysis: {
-          whatItMeans: [
-            `${resourceName} allows callback URLs that CheckMate identified as insecure.`,
-          ],
-          whyItMatters: [
-            "Removing development callback URLs reduces the chance of authentication responses being redirected to unintended local endpoints.",
-            "All other configured callback URLs remain unchanged.",
-          ],
-          questions: [],
-          remediationConsiderations: [
-            `Remove the selected insecure callback URLs from ${resourceName}.`,
-          ],
-        },
-      };
-      recommendations.push(recommendation);
-      recommendationMap.set(recommendation.key, recommendation);
-    }
-    for (const selected of items) {
-      const actionCandidate = actionMap.get(selected.actionId);
-      if (
-        !actionCandidate ||
-        actionCandidate.findingId !== selected.findingId ||
-        deterministicActionIds.has(selected.actionId)
-      ) {
-        continue;
-      }
-      const item = cachedFindings.find(
-        ({ finding }) => finding.id === selected.findingId,
-      );
-      if (!item || recommendationMap.has(selected.actionId)) continue;
-      const recommendation: CachedRecommendation = {
-        key: selected.actionId,
-        title: selected.recommendationTitle,
-        selectionMode: "single",
-        defaultSelected: true,
-        actions: [
-          {
-            actionId: selected.actionId,
-            finding: item.finding,
-            actionableChange: actionCandidate.change,
-          },
-        ],
-        analysis: {
-          whatItMeans: selected.whatItMeans,
-          whyItMatters: selected.reason,
-          questions: [],
-          remediationConsiderations: selected.suggestedChanges,
-        },
-      };
-      recommendations.push(recommendation);
-      recommendationMap.set(recommendation.key, recommendation);
-    }
-    triaged = true;
-  };
-
   const runTriage = async (): Promise<void> => {
     if (triaged) return;
     if (!report || !session) {
@@ -733,45 +415,15 @@ export async function startUiServer(
       const configuration = await (
         dependencies.configurationLoader ?? loadActionableConfiguration
       )(findings, profile);
-      const aiConfiguration: ActionableConfigurationMap = new Map(
-        [...configuration].flatMap(([findingId, changes]) => {
-          const sourceFinding = cachedFindings.find(
-            ({ finding }) => finding.id === findingId,
-          )?.finding;
-          const filtered = changes.filter(
-            (change) =>
-              !(
-                (change.resourceType === "client" &&
-                  (change.configPath === "callbacks" ||
-                    deterministicApplicationGroups.some(
-                      (group) => group.configPath === change.configPath,
-                    ))) ||
-                (change.resourceType === "connection" &&
-                  deterministicConnectionGroups.some(
-                    (group) =>
-                      group.validatorId === sourceFinding?.validatorId &&
-                      group.configPath === change.configPath,
-                  )) ||
-                (change.resourceType === "resource_server" &&
-                  sourceFinding?.validatorId ===
-                    "checkManagementAPIUserAccess" &&
-                  change.configPath ===
-                    "subject_type_authorization.user.policy")
-              ),
-          );
-          return filtered.length > 0 ? [[findingId, filtered]] : [];
-        }),
+      recommendations = buildDeterministicRecommendations(
+        findings,
+        configuration,
       );
-      if (aiConfiguration.size > 0 && !provider.triageFindings) {
-        throw new Error(
-          "Report-level AI triage is unavailable for this provider.",
-        );
+      recommendationMap.clear();
+      for (const recommendation of recommendations) {
+        recommendationMap.set(recommendation.key, recommendation);
       }
-      const items =
-        aiConfiguration.size > 0
-          ? await provider.triageFindings!(findings, aiConfiguration)
-          : [];
-      applyTriage(items, configuration);
+      triaged = true;
     })();
     try {
       await triagePromise;
@@ -804,10 +456,7 @@ export async function startUiServer(
               decision.decision.status === "approved",
           ),
         ).length;
-        const satisfied =
-          recommendation.selectionMode === "alternatives"
-            ? approved === 1
-            : approved === actionIds.length;
+        const satisfied = approved === actionIds.length;
         const requirements =
           resolutionRequirementsByValidator.get(validatorId) ?? [];
         requirements.push(satisfied);
@@ -1017,10 +666,6 @@ export async function startUiServer(
           actionableChanges: recommendation.actions.map((action) => ({
             actionId: action.actionId,
             ...action.actionableChange,
-            ...(action.optionLabel ? { optionLabel: action.optionLabel } : {}),
-            ...(action.optionDescription
-              ? { optionDescription: action.optionDescription }
-              : {}),
           })),
           reviewed,
           selectedActionIds,
@@ -1190,13 +835,6 @@ export async function startUiServer(
         if (parsed.status === "approved" && selectedActionIds.size === 0) {
           throw new Error("Select at least one option, or remain unchanged.");
         }
-        if (
-          parsed.status === "approved" &&
-          recommendation.selectionMode === "alternatives" &&
-          selectedActionIds.size !== 1
-        ) {
-          throw new Error("Select exactly one access policy.");
-        }
         const decidedAt = now().toISOString();
         const adminNote = boundedUserText(
           parsed.rationale,
@@ -1212,10 +850,9 @@ export async function startUiServer(
           const entry = createReviewEntry(
             action.finding,
             recommendation.analysis,
-            [],
             selected ? "approved" : "accepted_risk",
             adminNote ||
-              (selected ? "Accepted AI suggestion." : "Remained unchanged."),
+              (selected ? "Accepted suggestion." : "Remained unchanged."),
             decidedAt,
             sensitiveValues,
             [action.actionableChange],
