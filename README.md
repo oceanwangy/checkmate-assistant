@@ -224,7 +224,7 @@ The chatbot's report evidence comes from six read-only in-process tools implemen
 - `checkmate_get_application_posture`
 - `checkmate_get_security_topic_context`
 
-The newest valid JSON report is selected when `reportId` is omitted, and the chat session pins every lookup to its scanned report. Tool responses include report and finding IDs, freshness, findings-only coverage warnings, and redacted evidence. The tools hold no Auth0 or OpenAI credentials, accept report IDs rather than arbitrary paths, and reject oversized reports.
+The newest valid JSON report is selected when `reportId` is omitted, and the chat session pins every lookup to its scanned report. Tool responses include report and finding IDs, freshness, findings-only coverage warnings, redacted evidence, and an `autoRemediable` flag for findings the deterministic mapping can turn into a prepared dev change. The tools hold no Auth0 or OpenAI credentials, accept report IDs rather than arbitrary paths, and reject oversized reports.
 
 ## Verification
 
@@ -261,6 +261,7 @@ A real report from the target tenant is still needed to confirm any tenant/versi
 - Each stored decision references its CheckMate finding ID and preserves the available CheckMate wording.
 - No generic shell command or generic Auth0 Management API function exists.
 - Chat plans are dev-only, expire after ten minutes, require a checkbox plus `EXECUTE DEV`, and are revalidated against the exact confirmed request digest before any PATCH.
+- The chatbot is instructed to recommend `autoRemediable` findings first, and a change offered once is never re-offered in the same session and report: the server filters repeat action confirmations in code and tells the model which finding IDs were already suggested.
 - The runner invokes only the pinned CheckMate package entry point through the current Node.js runtime, with no user-controlled executable or arguments.
 - Secrets are excluded from command arguments, logs, errors, reports, snapshots, and generated files.
 - Verbose child output is redacted against the active client secret.

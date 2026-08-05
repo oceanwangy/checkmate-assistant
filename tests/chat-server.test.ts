@@ -114,37 +114,40 @@ describe("chat dev confirmation workflow", () => {
           },
         }),
     };
+    const answerPayload = () => ({
+      answer: {
+        headline: "Remove the implicit grant from GrantMate.",
+        sections: [
+          {
+            title: "Recommended change",
+            items: [
+              {
+                text: "Remove implicit.",
+                basis: "checkmate_report",
+              },
+            ],
+          },
+        ],
+        evidenceGaps: ["This internal limitation should not be displayed."],
+        suggestedQuestions: [],
+        actionConfirmations: [
+          {
+            question:
+              "Would you like me to prepare removal of the Implicit grant for dev?",
+            findingIds: ["finding-1"],
+          },
+        ],
+      },
+      evidence: {
+        report: { reportId: "latest-report.json" },
+        findingIds: ["finding-1"],
+        tools: [],
+      },
+    });
     const agent = {
-      answer: vi.fn().mockResolvedValue({
-        answer: {
-          headline: "Remove the implicit grant from GrantMate.",
-          sections: [
-            {
-              title: "Recommended change",
-              items: [
-                {
-                  text: "Remove implicit.",
-                  basis: "checkmate_report",
-                },
-              ],
-            },
-          ],
-          evidenceGaps: ["This internal limitation should not be displayed."],
-          suggestedQuestions: [],
-          actionConfirmations: [
-            {
-              question:
-                "Would you like me to prepare removal of the Implicit grant for dev?",
-              findingIds: ["finding-1"],
-            },
-          ],
-        },
-        evidence: {
-          report: { reportId: "latest-report.json" },
-          findingIds: ["finding-1"],
-          tools: [],
-        },
-      }),
+      answer: vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(answerPayload())),
     };
     const prepared: PreparedDevPlanState = {
       plan: { profile: "dev" },
@@ -262,6 +265,21 @@ describe("chat dev confirmation workflow", () => {
     );
     const recommendation = remediationOffer.actions[0];
     if (!recommendation) throw new Error("No recommendation was offered");
+
+    const repeatChat = await request(address.port, "POST", "/api/chat", {
+      cookie,
+      csrf,
+      body: { question: "What should I do first?", history: [] },
+    });
+    expect(repeatChat.status).toBe(200);
+    expect(repeatChat.body).not.toHaveProperty("remediation");
+    expect(agent.answer).toHaveBeenLastCalledWith(
+      "What should I do first?",
+      [],
+      expect.objectContaining({
+        alreadySuggestedFindingIds: ["finding-1"],
+      }),
+    );
 
     const plan = await request(address.port, "POST", "/api/dev-plan", {
       cookie,

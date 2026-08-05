@@ -26,14 +26,12 @@ export async function runChatCheckmateScan(
   input: ChatCheckmateScanInput,
   dependencies: ChatCheckmateScanDependencies = {},
 ): Promise<ChatCheckmateScanResult> {
-  const env = input.env ?? process.env;
-  const config = loadCheckmateConfig(input.profile, env);
   const reportsDirectory = path.resolve(input.reportsDirectory);
-  if (config.outputDirectory !== reportsDirectory) {
-    throw new Error(
-      "CHECKMATE_REPORTS_DIR and AUTH0CHECKMATE_FILE_PATH must resolve to the same report directory.",
-    );
-  }
+  const env: NodeJS.ProcessEnv = {
+    ...(input.env ?? process.env),
+    AUTH0CHECKMATE_FILE_PATH: reportsDirectory,
+  };
+  const config = loadCheckmateConfig(input.profile, env);
   const metadata = await (dependencies.scanExecutor ?? executeScan)(
     { profile: input.profile },
     { env },

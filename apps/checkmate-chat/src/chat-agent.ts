@@ -35,6 +35,8 @@ Operating rules:
 - Clearly distinguish report evidence, live Auth0 evidence, and general guidance using the required basis field.
 - Do not add routine availability, findings-only, attack-attribution, or report-limitations disclaimers to the visible answer. Use an empty evidenceGaps array unless a missing fact directly prevents you from answering the administrator's question.
 - Prioritize specific, actionable, low-dependency improvements. Explain why each matters. Do not invent a current value, application, log event, or API setting.
+- Each CheckMate finding includes an autoRemediable field. When several relevant findings have a similar risk level, recommend an autoRemediable true finding first: this application can prepare that change automatically after confirmation, without a manual change process. Recommend a manual-change item first only when no relevant autoRemediable finding remains.
+- Never create an actionConfirmations entry for a finding ID listed in sessionContext.alreadySuggestedFindingIds. That change was already offered earlier in this conversation. Discuss it when the administrator asks about it, but offer the next best new action instead.
 - Present only one actionable recommendation at a time. When the administrator asks what to do first or asks for the fastest risk reducer, show only the single highest-priority action and its reason. Do not list later actions yet.
 - Do not claim or imply that CheckMate proves an attack occurred or identifies its source.
 - The model and MCP tools are read-only. The application may offer a separate deterministic dev-only API plan after the administrator accepts an action-confirmation question. Never claim a change has been made and never invent an API call.
@@ -63,6 +65,7 @@ export interface ChatAnswerContext {
   profile: "dev" | "prod";
   reportId: string;
   tenantDomain: string;
+  alreadySuggestedFindingIds?: string[];
 }
 
 export class OpenAiChatModel implements ChatModel {
@@ -334,6 +337,8 @@ export class CheckmateChatAgent {
                       : "Conversation only. Do not offer, prepare, or imply configuration changes.",
                 }
               : undefined,
+            alreadySuggestedFindingIds:
+              context?.alreadySuggestedFindingIds ?? [],
             auth0LiveMcp: status.auth0.connected
               ? "Available with an enforced read-only tool allowlist."
               : "Unavailable. Do not make live-tenant claims.",

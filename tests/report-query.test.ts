@@ -3,6 +3,7 @@ import type { NormalizedCheckmateFinding } from "@checkmate-assistant/core";
 import {
   findApplicationFindings,
   findTopicFindings,
+  isAutoRemediableFinding,
   searchFindings,
   toFindingView,
 } from "@checkmate-assistant/core";
@@ -77,5 +78,20 @@ describe("report queries", () => {
       enabled: false,
       client_secret: "[REDACTED]",
     });
+  });
+
+  it("marks findings the deterministic mapping supports as autoRemediable", () => {
+    const views = findApplicationFindings(findings, "Example SPA");
+    expect(views.map((view) => [view.findingId, view.autoRemediable])).toEqual([
+      ["implicit-example-spa", true],
+      ["jwt-example-spa", false],
+    ]);
+    expect(isAutoRemediableFinding({ validatorId: "checkBruteForce" })).toBe(
+      true,
+    );
+    expect(isAutoRemediableFinding({ validatorId: "checkCustomDomain" })).toBe(
+      false,
+    );
+    expect(isAutoRemediableFinding({})).toBe(false);
   });
 });

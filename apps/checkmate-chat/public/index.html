@@ -21,6 +21,30 @@
           </span>
         </a>
         <div class="topbar-actions">
+          <div
+            id="official-auth0-mcp-status"
+            class="mcp-status pending"
+            role="status"
+            aria-live="polite"
+            aria-label="Official Auth0 MCP status: checking"
+            aria-describedby="official-auth0-mcp-tooltip"
+            tabindex="0"
+          >
+            <span class="mcp-status-dot" aria-hidden="true"></span>
+            <span class="mcp-status-copy">
+              <small>OFFICIAL AUTH0 MCP</small>
+              <strong>Checking…</strong>
+            </span>
+            <span
+              id="official-auth0-mcp-tooltip"
+              class="mcp-tooltip"
+              role="tooltip"
+            >
+              Optional. It enriches answers with read-only live context but is
+              not required for scanning, report interpretation, or confirmed dev
+              remediation.
+            </span>
+          </div>
           <a
             id="remediation-link"
             class="review-link"

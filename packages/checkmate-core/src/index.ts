@@ -1,6 +1,11 @@
 export { CheckmateReportError } from "./errors.js";
 export { redactSensitive } from "./redaction.js";
 export {
+  AUTO_REMEDIABLE_VALIDATOR_GROUPS,
+  AUTO_REMEDIABLE_VALIDATORS,
+  isAutoRemediableFinding,
+} from "./remediation-support.js";
+export {
   findApplicationFindings,
   findTopicFindings,
   searchFindings,

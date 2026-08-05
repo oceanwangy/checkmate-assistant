@@ -57,6 +57,25 @@ function configureScanButton(profile, target) {
   detail.textContent = `${target.tenantDomain} · ${profile === "dev" ? "confirmed changes supported" : "conversation only"}`;
 }
 
+function renderOfficialAuth0McpStatus(auth0) {
+  const statusNode = document.querySelector("#official-auth0-mcp-status");
+  statusNode.classList.remove("pending", "connected", "unavailable");
+  const connected = Boolean(auth0?.connected);
+  statusNode.classList.add(connected ? "connected" : "unavailable");
+  const statusText = connected ? "Connected · read-only" : "Not connected";
+  statusNode.querySelector("strong").textContent = statusText;
+  statusNode.setAttribute(
+    "aria-label",
+    `Official Auth0 MCP status: ${statusText}`,
+  );
+  const purpose =
+    "Optional. It enriches answers with read-only live context but is not required for scanning, report interpretation, or confirmed dev remediation.";
+  document.querySelector("#official-auth0-mcp-tooltip").textContent = connected
+    ? `${purpose} It is currently connected with the enforced read-only tool allowlist.`
+    : `${purpose} To connect it, run npx @auth0/auth0-mcp-server init --read-only, then restart the chatbot.`;
+  statusNode.removeAttribute("title");
+}
+
 function renderSelectedReport(report, environment) {
   state.activeProfile = environment?.profile ?? null;
   state.activeReportId = report?.reportId ?? null;
@@ -102,6 +121,7 @@ async function loadStatus() {
     if (!response.ok) throw new Error("Status could not be loaded.");
     const status = await response.json();
     state.csrfToken = status.csrfToken;
+    renderOfficialAuth0McpStatus(status.auth0);
     state.scanTargets = status.scanTargets;
     configureScanButton("dev", status.scanTargets.dev);
     configureScanButton("prod", status.scanTargets.prod);
@@ -112,6 +132,7 @@ async function loadStatus() {
     document.querySelector("#report-title").textContent = "Chatbot unavailable";
     document.querySelector("#report-detail").textContent = error.message;
     state.scanTargets = null;
+    renderOfficialAuth0McpStatus({ connected: false });
     syncControls();
   }
 }

@@ -63,7 +63,7 @@ describe("chat CheckMate scan service", () => {
     });
   });
 
-  it("rejects a report directory that differs from the CheckMate output directory", async () => {
+  it("uses the chatbot report directory even when the inherited output path differs", async () => {
     const reportsDirectory = await mkdtemp(
       path.join(tmpdir(), "checkmate-chat-reports-"),
     );
@@ -71,9 +71,17 @@ describe("chat CheckMate scan service", () => {
       path.join(tmpdir(), "checkmate-chat-output-"),
     );
     temporaryDirectories.push(reportsDirectory, outputDirectory);
+    const scanExecutor = vi.fn().mockResolvedValue({
+      profile: "prod",
+      targetDomain: "prod-tenant.auth0.com",
+      startedAt: "2026-08-05T09:00:00.000Z",
+      finishedAt: "2026-08-05T09:01:00.000Z",
+      reportPath: path.join(reportsDirectory, "prod-report.json"),
+      exitCode: 0,
+    });
 
-    await expect(
-      runChatCheckmateScan({
+    const result = await runChatCheckmateScan(
+      {
         profile: "prod",
         reportsDirectory,
         env: {
@@ -82,9 +90,13 @@ describe("chat CheckMate scan service", () => {
           AUTH0CHECKMATE_PROD_CLIENT_SECRET: "prod-secret",
           AUTH0CHECKMATE_FILE_PATH: outputDirectory,
         },
-      }),
-    ).rejects.toThrow(
-      "CHECKMATE_REPORTS_DIR and AUTH0CHECKMATE_FILE_PATH must resolve to the same report directory.",
+      },
+      { scanExecutor },
     );
+
+    expect(result.reportId).toBe("prod-report.json");
+    expect(scanExecutor.mock.calls[0]?.[1]).toMatchObject({
+      env: { AUTH0CHECKMATE_FILE_PATH: reportsDirectory },
+    });
   });
 });

@@ -1,3 +1,4 @@
+import { AUTO_REMEDIABLE_VALIDATOR_GROUPS } from "@checkmate-assistant/core";
 import { z } from "zod";
 import type { CheckmateConfig } from "../config/env.js";
 import type { NormalizedCheckmateFinding } from "../findings/types.js";
@@ -42,27 +43,21 @@ interface ActionableConfigurationOptions {
   retry?: RateLimitRetryOptions;
 }
 
-const CONNECTION_VALIDATORS = new Set([
-  "checkPasswordPolicy",
-  "checkPasswordComplexity",
-  "checkPasswordNoPersonalInfo",
-  "checkPasswordHistory",
-  "checkAuthenticationMethods",
-  "checkEmailAttributeVerification",
-]);
+const CONNECTION_VALIDATORS = new Set<string>(
+  AUTO_REMEDIABLE_VALIDATOR_GROUPS.connection,
+);
 const LEGACY_PASSWORD_VALIDATORS = new Set([
   "checkPasswordPolicy",
   "checkPasswordComplexity",
   "checkPasswordNoPersonalInfo",
   "checkPasswordHistory",
 ]);
-const ATTACK_VALIDATORS = new Set(["checkBruteForce", "checkBreachedPassword"]);
-const CLIENT_VALIDATORS = new Set([
-  "checkJWTSignAlg",
-  "checkCrossOriginAuthentication",
-  "checkGrantTypes",
-  "checkAllowedCallbacks",
-]);
+const ATTACK_VALIDATORS = new Set<string>(
+  AUTO_REMEDIABLE_VALIDATOR_GROUPS.attackProtection,
+);
+const CLIENT_VALIDATORS = new Set<string>(
+  AUTO_REMEDIABLE_VALIDATOR_GROUPS.client,
+);
 
 function tenantBaseUrl(domain: string): string {
   if (!/^[a-zA-Z0-9.-]+\.auth0\.com$/.test(domain)) {

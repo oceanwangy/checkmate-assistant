@@ -54,6 +54,7 @@ interface Session {
   inFlight: boolean;
   recommendations: Map<string, RecommendationContext>;
   plans: Map<string, StoredDevPlan>;
+  suggestedFindingIds: Set<string>;
   activeEnvironment?: {
     profile: ChatScanProfile;
     tenantDomain: string;
@@ -203,6 +204,7 @@ export function createChatServer(options: ChatServerOptions): Server {
       inFlight: false,
       recommendations: new Map(),
       plans: new Map(),
+      suggestedFindingIds: new Set(),
     };
     sessions.set(id, session);
     response.setHeader(
@@ -326,12 +328,21 @@ export function createChatServer(options: ChatServerOptions): Server {
       const result = await agent.answer(
         parsed.data.question,
         parsed.data.history,
-        session.activeEnvironment,
+        {
+          ...session.activeEnvironment,
+          alreadySuggestedFindingIds: [...session.suggestedFindingIds],
+        },
       );
       if (session.activeEnvironment.profile === "prod") {
         result.answer.actionConfirmations = [];
         delete result.remediation;
       }
+      result.answer.actionConfirmations =
+        result.answer.actionConfirmations.filter((confirmation) =>
+          confirmation.findingIds.some(
+            (findingId) => !session.suggestedFindingIds.has(findingId),
+          ),
+        );
       const reportId = result.evidence.report?.reportId;
       if (reportId !== session.activeEnvironment.reportId) {
         throw new Error(
@@ -347,6 +358,9 @@ export function createChatServer(options: ChatServerOptions): Server {
         );
         const actions = result.answer.actionConfirmations.map(
           (confirmation) => {
+            for (const findingId of confirmation.findingIds) {
+              session.suggestedFindingIds.add(findingId);
+            }
             if (!planningAvailable || !reportId) {
               return {
                 question: confirmation.question,
@@ -467,6 +481,7 @@ export function createChatServer(options: ChatServerOptions): Server {
       };
       session.recommendations.clear();
       session.plans.clear();
+      session.suggestedFindingIds.clear();
       const counts = reportCounts(summary.value);
       sendJson(response, 200, {
         scanned: true,

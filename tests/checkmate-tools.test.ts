@@ -50,6 +50,7 @@ describe("in-process CheckMate report tools", () => {
       findings: [
         expect.objectContaining({
           validatorId: "checkBreachedPasswordDetection",
+          autoRemediable: false,
         }),
       ],
     });
