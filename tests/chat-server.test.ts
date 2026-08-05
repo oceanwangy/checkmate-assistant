@@ -1,6 +1,7 @@
 import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatConfig } from "../apps/checkmate-chat/src/config.js";
+import type { CheckmateScanLike } from "../apps/checkmate-chat/src/checkmate-scan.js";
 import type {
   DevRemediationLike,
   PreparedDevPlanState,
@@ -84,6 +85,10 @@ describe("chat dev confirmation workflow", () => {
       auth0Enabled: false,
       auth0Command: process.execPath,
       auth0Arguments: [],
+      scanTargets: {
+        dev: { configured: true, tenantDomain: "dev-tenant.auth0.com" },
+        prod: { configured: true, tenantDomain: "prod-tenant.auth0.com" },
+      },
       devTenantDomain: "dev-tenant.auth0.com",
       devPlanningEnabled: true,
       devRemediationEnabled: true,
@@ -186,7 +191,28 @@ describe("chat dev confirmation workflow", () => {
       execute,
       writeAudit,
     };
-    const server = createChatServer({ config, hub, agent, remediation });
+    const scanner: CheckmateScanLike = {
+      run: vi.fn((profile: "dev" | "prod") =>
+        Promise.resolve({
+          profile,
+          tenantDomain:
+            profile === "dev"
+              ? "dev-tenant.auth0.com"
+              : "prod-tenant.auth0.com",
+          reportId: "latest-report.json",
+          startedAt: "2026-07-14T13:59:00.000Z",
+          finishedAt: "2026-07-14T14:00:00.000Z",
+          checkmateVersion: "1.8.3",
+        }),
+      ),
+    };
+    const server = createChatServer({
+      config,
+      hub,
+      agent,
+      remediation,
+      scanner,
+    });
     servers.push(server);
     await new Promise<void>((resolve) =>
       server.listen(0, "127.0.0.1", resolve),
@@ -202,6 +228,21 @@ describe("chat dev confirmation workflow", () => {
     if (!cookie || typeof csrf !== "string") {
       throw new Error("The test session was not created.");
     }
+
+    const chatBeforeScan = await request(address.port, "POST", "/api/chat", {
+      cookie,
+      csrf,
+      body: { question: "Harden GrantMate", history: [] },
+    });
+    expect(chatBeforeScan.status).toBe(409);
+    expect(agent.answer).not.toHaveBeenCalled();
+
+    const scan = await request(address.port, "POST", "/api/scan", {
+      cookie,
+      csrf,
+      body: { profile: "dev" },
+    });
+    expect(scan.status).toBe(200);
 
     const chat = await request(address.port, "POST", "/api/chat", {
       cookie,
@@ -270,5 +311,34 @@ describe("chat dev confirmation workflow", () => {
     });
     expect(execute).toHaveBeenCalledOnce();
     expect(writeAudit).toHaveBeenCalledTimes(3);
+
+    const prodScan = await request(address.port, "POST", "/api/scan", {
+      cookie,
+      csrf,
+      body: { profile: "prod" },
+    });
+    expect(prodScan.status).toBe(200);
+    expect(prodScan.body.activeEnvironment).toMatchObject({
+      profile: "prod",
+      tenantDomain: "prod-tenant.auth0.com",
+      changesSupported: false,
+    });
+
+    const prodChat = await request(address.port, "POST", "/api/chat", {
+      cookie,
+      csrf,
+      body: { question: "Harden production", history: [] },
+    });
+    expect(prodChat.status).toBe(200);
+    expect(prodChat.body).not.toHaveProperty("remediation");
+    expect(agent.answer).toHaveBeenLastCalledWith(
+      "Harden production",
+      [],
+      expect.objectContaining({
+        profile: "prod",
+        tenantDomain: "prod-tenant.auth0.com",
+        reportId: "latest-report.json",
+      }),
+    );
   });
 });

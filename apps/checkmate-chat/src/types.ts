@@ -98,6 +98,21 @@ export interface ChatStatus {
     disabledReason?: string;
     confirmationRequired: true;
   };
+  scanTargets: Record<
+    "dev" | "prod",
+    {
+      configured: boolean;
+      tenantDomain?: string;
+      changesSupported: boolean;
+    }
+  >;
+  scanInProgress: boolean;
+  activeEnvironment?: {
+    profile: "dev" | "prod";
+    tenantDomain: string;
+    reportId: string;
+    changesSupported: boolean;
+  };
   report?: ReportReference & {
     counts?: {
       passed: number;

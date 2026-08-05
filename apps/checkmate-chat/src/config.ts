@@ -30,6 +30,10 @@ export interface ChatConfig {
   auth0Enabled: boolean;
   auth0Command: string;
   auth0Arguments: string[];
+  scanTargets: Record<
+    "dev" | "prod",
+    { configured: boolean; tenantDomain?: string }
+  >;
   devTenantDomain?: string;
   devRemediationDisabledReason?: string;
   devPlanningEnabled: boolean;
@@ -94,11 +98,17 @@ export function loadChatConfig(
   }
 
   const devTenantDomain = env.AUTH0CHECKMATE_DEV_DOMAIN?.trim();
+  const prodTenantDomain = env.AUTH0CHECKMATE_PROD_DOMAIN?.trim();
   const devWriteDomain = env.CHECKMATE_CHAT_DEV_WRITE_DOMAIN?.trim();
   const devCredentialsConfigured = Boolean(
     devTenantDomain &&
     env.AUTH0CHECKMATE_DEV_CLIENT_ID?.trim() &&
     env.AUTH0CHECKMATE_DEV_CLIENT_SECRET?.trim(),
+  );
+  const prodCredentialsConfigured = Boolean(
+    prodTenantDomain &&
+    env.AUTH0CHECKMATE_PROD_CLIENT_ID?.trim() &&
+    env.AUTH0CHECKMATE_PROD_CLIENT_SECRET?.trim(),
   );
   let devRemediationDisabledReason: string | undefined;
   if (!devCredentialsConfigured) {
@@ -133,6 +143,16 @@ export function loadChatConfig(
     auth0Enabled,
     auth0Command: env.CHECKMATE_CHAT_AUTH0_COMMAND ?? process.execPath,
     auth0Arguments,
+    scanTargets: {
+      dev: {
+        configured: devCredentialsConfigured,
+        ...(devTenantDomain ? { tenantDomain: devTenantDomain } : {}),
+      },
+      prod: {
+        configured: prodCredentialsConfigured,
+        ...(prodTenantDomain ? { tenantDomain: prodTenantDomain } : {}),
+      },
+    },
     ...(devTenantDomain ? { devTenantDomain } : {}),
     ...(devRemediationDisabledReason ? { devRemediationDisabledReason } : {}),
     devPlanningEnabled: devCredentialsConfigured,

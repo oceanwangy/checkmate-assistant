@@ -48,6 +48,10 @@ export const chatRequestSchema = z.object({
     .default([]),
 });
 
+export const checkmateScanRequestSchema = z
+  .object({ profile: z.enum(["dev", "prod"]) })
+  .strict();
+
 export const devPlanRequestSchema = z
   .object({ recommendationId: z.string().min(20).max(100) })
   .strict();

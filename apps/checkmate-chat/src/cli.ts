@@ -2,6 +2,7 @@
 import path from "node:path";
 import dotenv from "dotenv";
 import { CheckmateChatAgent } from "./chat-agent.js";
+import { CheckmateScanCoordinator } from "./checkmate-scan.js";
 import { defaultProjectRoot, loadChatConfig } from "./config.js";
 import { DevRemediationCoordinator } from "./dev-remediation.js";
 import { McpHub } from "./mcp-hub.js";
@@ -63,7 +64,8 @@ async function main(): Promise<void> {
   await hub.initialize();
   const agent = new CheckmateChatAgent(hub, config);
   const remediation = new DevRemediationCoordinator(config);
-  const server = createChatServer({ config, hub, agent, remediation });
+  const scanner = new CheckmateScanCoordinator(config);
+  const server = createChatServer({ config, hub, agent, remediation, scanner });
 
   const close = (): void => {
     server.close(() => {

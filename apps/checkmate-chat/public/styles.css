@@ -118,16 +118,10 @@ summary:focus-visible {
   letter-spacing: 0.22em;
 }
 
-.topbar-actions,
-.source-status {
+.topbar-actions {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.source-status {
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .review-link {
@@ -190,74 +184,88 @@ summary:focus-visible {
   font-size: 13px;
 }
 
-.source-chip {
-  min-width: 145px;
-  padding: 9px 12px;
+.scan-actions {
+  min-width: min(620px, 55vw);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+.scan-action {
+  min-height: 62px;
+  padding: 10px 13px;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 11px;
+  color: var(--ink);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 13px;
   background: white;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
 }
 
-.source-chip strong,
-.source-chip small {
-  display: block;
-  line-height: 1.2;
+.scan-action:hover:not(:disabled) {
+  border-color: rgba(8, 115, 77, 0.48);
+  box-shadow: 0 8px 24px rgba(16, 36, 29, 0.08);
+  transform: translateY(-1px);
 }
 
-.source-chip strong {
-  font-size: 12px;
+.scan-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
-.source-chip small {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 10px;
+.scan-action.running {
+  border-color: var(--green);
+  background: var(--green-soft);
+  opacity: 1;
 }
 
-.source-icon {
-  width: 30px;
-  height: 30px;
+.scan-badge {
+  min-width: 42px;
+  height: 36px;
+  padding: 0 8px;
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  border-radius: 9px;
   color: var(--green);
+  border-radius: 10px;
   background: var(--green-soft);
   font-size: 10px;
   font-weight: 850;
+  letter-spacing: 0.06em;
 }
 
-.source-icon.auth0 {
-  color: #4e5963;
-  background: #eef1f3;
-}
-
-.source-icon.dev {
-  color: #9c5d07;
-  background: var(--amber-soft);
-  font-size: 8px;
-}
-
-.source-chip.pending .source-icon {
-  animation: breathe 1.5s ease-in-out infinite;
-}
-
-.source-chip.unavailable {
-  background: #fafafa;
-}
-
-.source-chip.unavailable .source-icon {
+.scan-action.prod .scan-badge {
   color: var(--amber);
   background: var(--amber-soft);
 }
 
-@keyframes breathe {
-  50% {
-    opacity: 0.45;
-  }
+.scan-copy,
+.scan-copy strong,
+.scan-copy small {
+  display: block;
+  min-width: 0;
+}
+
+.scan-copy strong {
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.scan-copy small {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conversation-wrap {
@@ -1140,14 +1148,10 @@ summary:focus-visible {
     gap: 14px;
   }
 
-  .source-status {
+  .scan-actions {
     width: 100%;
-    justify-content: flex-start;
-  }
-
-  .source-chip {
-    flex: 1 1 145px;
     min-width: 0;
+    grid-template-columns: 1fr;
   }
 
   .starter-grid {

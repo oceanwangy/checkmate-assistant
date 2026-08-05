@@ -36,17 +36,17 @@ describe("CheckMate runner", () => {
     expect(runtime.entrypoint).toMatch(
       /node_modules\/@auth0\/auth0-checkmate\/bin\/index\.js$/,
     );
-    expect(result.metadata.checkmateVersion).toBe("1.8.1");
+    expect(result.metadata.checkmateVersion).toBe("1.8.3");
   });
 
   it("does not forward unrelated credentials from the parent environment", () => {
     const childEnvironment = buildCheckmateEnvironment(config, {
       PATH: "/usr/bin",
-      OPENAI_API_KEY: "openai-secret",
+      UNRELATED_API_KEY: "unrelated-secret",
       GITHUB_TOKEN: "github-secret",
     });
     expect(childEnvironment.PATH).toBe("/usr/bin");
-    expect(childEnvironment.OPENAI_API_KEY).toBeUndefined();
+    expect(childEnvironment.UNRELATED_API_KEY).toBeUndefined();
     expect(childEnvironment.GITHUB_TOKEN).toBeUndefined();
   });
 

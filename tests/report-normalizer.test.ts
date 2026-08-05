@@ -27,10 +27,36 @@ describe("CheckMate report normalisation", () => {
       validatorId: "checkPasswordComplexity",
       title: "Databases - Password Complexity",
       status: "failed",
+      priority: "red",
       severity: "High",
       recommendation: "Increase the minimum password length.",
       affectedResource: { name: "Customer database" },
       raw: detail,
+    });
+  });
+
+  it("preserves parent CheckMate priority when detail status differs", () => {
+    const report = normalizeCheckmateReport([
+      {
+        name: "checkPasswordHistory",
+        title: "Databases - Password History",
+        status: "green",
+        severity: "Low",
+        details: [
+          {
+            name: "Customer database",
+            status: "red",
+            field: "password_history_disabled",
+          },
+        ],
+      },
+    ]);
+
+    expect(report.findings[0]).toMatchObject({
+      validatorId: "checkPasswordHistory",
+      status: "failed",
+      priority: "green",
+      severity: "Low",
     });
   });
 

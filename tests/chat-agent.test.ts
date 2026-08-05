@@ -26,6 +26,10 @@ const config: ChatConfig = {
   auth0Enabled: false,
   auth0Command: process.execPath,
   auth0Arguments: [],
+  scanTargets: {
+    dev: { configured: false },
+    prod: { configured: false },
+  },
   devPlanningEnabled: false,
   devRemediationEnabled: false,
 };
@@ -104,7 +108,7 @@ class FakeHub implements McpHubLike {
 }
 
 describe("CheckMate chatbot agent", () => {
-  it("reads the newest report, runs a bounded MCP lookup, and records evidence", async () => {
+  it("binds every MCP lookup to the selected report and records evidence", async () => {
     const requests: ModelRequest[] = [];
     const model: ChatModel = {
       create: vi.fn((request: ModelRequest) => {
@@ -160,17 +164,26 @@ describe("CheckMate chatbot agent", () => {
 
     const result = await agent.answer(
       "I experienced credential stuffing. What should I do?",
+      [],
+      {
+        profile: "dev",
+        reportId: "latest-report.json",
+        tenantDomain: "example.auth0.com",
+      },
     );
 
     expect(hub.callTool).toHaveBeenNthCalledWith(
       1,
       "checkmate_get_report_summary",
-      {},
+      { reportId: "latest-report.json" },
     );
     expect(hub.callTool).toHaveBeenNthCalledWith(
       2,
       "checkmate_get_security_topic_context",
-      { topic: "credential_stuffing" },
+      {
+        topic: "credential_stuffing",
+        reportId: "latest-report.json",
+      },
     );
     expect(requests[1]?.input).toContainEqual(
       expect.objectContaining({
@@ -200,6 +213,46 @@ describe("CheckMate chatbot agent", () => {
         findingIds: ["check-breached-password-detection"],
       },
     ]);
+  });
+
+  it("removes change confirmations from production conversations", async () => {
+    const model: ChatModel = {
+      create: vi.fn().mockResolvedValue({
+        output: [],
+        outputParsed: {
+          headline: "Review the production finding.",
+          sections: [
+            {
+              title: "Recommendation",
+              items: [
+                {
+                  text: "Plan the change through production governance.",
+                  basis: "checkmate_report",
+                },
+              ],
+            },
+          ],
+          evidenceGaps: [],
+          suggestedQuestions: [],
+          actionConfirmations: [
+            {
+              question: "Would you like me to prepare this change?",
+              findingIds: ["check-breached-password-detection"],
+            },
+          ],
+        },
+        outputText: "",
+      }),
+    };
+    const agent = new CheckmateChatAgent(new FakeHub(), config, model);
+
+    const result = await agent.answer("What should production change?", [], {
+      profile: "prod",
+      reportId: "latest-report.json",
+      tenantDomain: "example.auth0.com",
+    });
+
+    expect(result.answer.actionConfirmations).toEqual([]);
   });
 
   it("redacts secrets while preserving security configuration names", () => {

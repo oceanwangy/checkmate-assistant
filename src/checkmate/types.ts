@@ -5,18 +5,22 @@ export type {
   NormalizedCheckmateReport,
 } from "@checkmate-assistant/core";
 
-export interface ReportCounts {
-  passed: number;
-  failed: number;
-  warning: number;
+export interface ReportPriorityCounts {
+  red: number;
+  yellow: number;
+  green: number;
+  blue: number;
+  violet: number;
   unknown: number;
 }
 
-export interface ReportSummary extends ReportCounts {
+export interface ReportSummary {
   tenant?: string;
   generatedAt?: string;
   reportPath: string;
-  passedChecksIncluded: boolean;
+  reportedValidatorCount: number;
+  detailItemCount: number;
+  priorities: ReportPriorityCounts;
 }
 
 export interface ScanMetadata {

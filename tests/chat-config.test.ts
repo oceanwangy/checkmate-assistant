@@ -23,6 +23,14 @@ describe("chat configuration", () => {
     expect(config.devPlanningEnabled).toBe(true);
     expect(config.devRemediationEnabled).toBe(true);
     expect(config.devTenantDomain).toBe("dev-tenant.auth0.com");
+    expect(config.scanTargets.dev).toEqual({
+      configured: true,
+      tenantDomain: "dev-tenant.auth0.com",
+    });
+    expect(config.scanTargets.prod).toEqual({
+      configured: false,
+      tenantDomain: "prod-tenant.auth0.com",
+    });
   });
 
   it("uses the explicit chat dev allowlist even when another workflow reuses the domain", () => {

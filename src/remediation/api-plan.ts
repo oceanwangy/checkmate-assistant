@@ -1,4 +1,5 @@
 import { z } from "zod";
+import path from "node:path";
 import type { ActionableChange } from "./actionable-change.js";
 import type { ReviewSession } from "./review-schema.js";
 
@@ -18,6 +19,17 @@ const apiCallSchema = z.object({
     z.object({ path: z.string().min(1), expectedValue: z.unknown() }),
   ),
   body: z.record(z.unknown()),
+  validatedRequestSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  curl: z
+    .object({
+      shell: z.literal("bash"),
+      requiredEnvironmentVariables: z.array(z.string().min(1)).min(3),
+      script: z.string().min(1),
+    })
+    .optional(),
 });
 
 export const apiPlanSchema = z.object({
@@ -25,6 +37,11 @@ export const apiPlanSchema = z.object({
   generatedAt: z.string().datetime(),
   sourceReport: z.string().min(1),
   profile: z.enum(["dev", "prod"]),
+  tenantDomain: z
+    .string()
+    .regex(/^[a-zA-Z0-9.-]+\.auth0\.com$/)
+    .optional(),
+  validatedAt: z.string().datetime().optional(),
   calls: z.array(apiCallSchema),
   unchangedActionIds: z.array(z.string().min(1)),
   alreadyCompliantActionIds: z.array(z.string().min(1)),
@@ -174,7 +191,7 @@ export function buildApiPlanFromActions(
   return apiPlanSchema.parse({
     schemaVersion: 1,
     generatedAt,
-    sourceReport,
+    sourceReport: path.basename(sourceReport),
     profile,
     calls: callsForActions(actions),
     unchangedActionIds: [],
@@ -205,7 +222,7 @@ export function buildApiPlan(
   return apiPlanSchema.parse({
     schemaVersion: 1,
     generatedAt,
-    sourceReport: session.report.sourceReport,
+    sourceReport: path.basename(session.report.sourceReport),
     profile,
     calls: callsForActions(approvedActions),
     unchangedActionIds,

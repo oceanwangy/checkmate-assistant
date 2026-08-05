@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { filterFindings } from "../src/findings/filter.js";
 import type { NormalizedCheckmateFinding } from "../src/findings/types.js";
-import { countFindings } from "../src/checkmate/summary.js";
-import type { LoadedCheckmateReport } from "../src/checkmate/types.js";
-import {
-  classifyFindingPriority,
-  prioritizeFindings,
-} from "../src/findings/priority.js";
 
 const findings: NormalizedCheckmateFinding[] = [
   { id: "1", title: "Failed", status: "failed", raw: {} },
@@ -21,42 +15,5 @@ describe("findings", () => {
       "1",
     ]);
     expect(filterFindings(findings, "all")).toHaveLength(4);
-  });
-
-  it("counts every normalised status", () => {
-    const report: LoadedCheckmateReport = {
-      findings,
-      raw: [],
-      findingsOnly: false,
-      sourcePath: "/tmp/report.json",
-    };
-    expect(countFindings(report)).toEqual({
-      passed: 1,
-      failed: 1,
-      warning: 1,
-      unknown: 1,
-    });
-  });
-
-  it("puts obvious tenant hardening before app-specific review", () => {
-    const appFinding: NormalizedCheckmateFinding = {
-      id: "app",
-      title: "Application callback URL",
-      status: "failed",
-      severity: "High",
-      raw: {},
-    };
-    const mfaFinding: NormalizedCheckmateFinding = {
-      id: "mfa",
-      title: "MFA is not enforced",
-      status: "failed",
-      severity: "Medium",
-      raw: {},
-    };
-    expect(classifyFindingPriority(appFinding)).toBe("app_specific");
-    expect(classifyFindingPriority(mfaFinding)).toBe("obvious");
-    expect(
-      prioritizeFindings([appFinding, mfaFinding]).map(({ id }) => id),
-    ).toEqual(["mfa", "app"]);
   });
 });

@@ -2,7 +2,7 @@
   "name": "checkmate-remediation-assistant",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only remediation workflow driven by Auth0 CheckMate reports",
+  "description": "Deterministic CheckMate remediation, MCP, and security chatbot",
   "type": "module",
   "workspaces": [
     "packages/*",
@@ -22,8 +22,6 @@
     "build:mcp": "npm run build --workspace @checkmate-assistant/mcp-server",
     "predev": "npm run build:core",
     "dev": "tsx src/cli.ts",
-    "preeval:prompts": "npm run build:core",
-    "eval:prompts": "tsx src/evaluation/evaluate-report-prompts.ts",
     "lint": "eslint .",
     "prechat": "npm run build:core && npm run build:app && npm run build:mcp && npm run build:chat",
     "chat": "npm run start --workspace @checkmate-assistant/chat --",
@@ -37,11 +35,9 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@auth0/auth0-checkmate": "1.8.1",
-    "@inquirer/prompts": "7.10.1",
+    "@auth0/auth0-checkmate": "1.8.3",
     "commander": "^14.0.0",
     "dotenv": "^17.0.0",
-    "openai": "^5.0.0",
     "yaml": "^2.8.0",
     "zod": "^3.25.0"
   },

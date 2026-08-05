@@ -9,11 +9,11 @@ import {
   writeApiPlan,
 } from "../src/remediation/api-plan-writer.js";
 import type { ReviewSession } from "../src/remediation/review-schema.js";
+import { finalizeValidatedApiPlan } from "../src/remediation/validated-api-plan.js";
 
 const analysis = {
   whatItMeans: ["The current setting needs improvement."],
   whyItMatters: ["The proposed setting reduces risk."],
-  questions: [],
   remediationConsiderations: ["Apply the proposed setting."],
 };
 
@@ -22,7 +22,7 @@ function session(): ReviewSession {
     schemaVersion: 1,
     report: { sourceReport: "/reports/tenant-report.json" },
     review: {
-      model: "gpt-test",
+      guidanceEngine: "deterministic-test",
       startedAt: "2026-07-10T10:00:00.000Z",
       lastUpdatedAt: "2026-07-10T10:05:00.000Z",
       completedAt: "2026-07-10T10:05:00.000Z",
@@ -33,7 +33,6 @@ function session(): ReviewSession {
         checkmateTitle: "Password policy",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-policy",
         actionableChanges: [
           {
@@ -56,7 +55,6 @@ function session(): ReviewSession {
         checkmateTitle: "Password history",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-history",
         actionableChanges: [
           {
@@ -79,7 +77,6 @@ function session(): ReviewSession {
         checkmateTitle: "Passkeys",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-passkey",
         actionableChanges: [
           {
@@ -143,6 +140,65 @@ describe("Auth0 API plan", () => {
     expect(artifact.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("stamps every PATCH call with its live validation digest", () => {
+    const draft = buildApiPlan(session(), "dev", "2026-07-10T10:06:00.000Z");
+    const finalized = finalizeValidatedApiPlan(
+      draft,
+      {
+        valid: true,
+        profile: "dev",
+        validatedAt: "2026-07-10T10:07:00.000Z",
+        calls: [
+          {
+            id: "api-call-1",
+            endpoint: "/api/v2/connections/con_database",
+            method: "PATCH",
+            resourceName: "Username-Password-Authentication",
+            status: "ready",
+            requestSha256: "a".repeat(64),
+          },
+        ],
+      },
+      "tenant.auth0.com",
+    );
+
+    expect(finalized).toMatchObject({
+      tenantDomain: "tenant.auth0.com",
+      validatedAt: "2026-07-10T10:07:00.000Z",
+      calls: [
+        {
+          validatedRequestSha256: "a".repeat(64),
+          curl: {
+            shell: "bash",
+            requiredEnvironmentVariables: [
+              "AUTH0CHECKMATE_DEV_DOMAIN",
+              "AUTH0CHECKMATE_DEV_CLIENT_ID",
+              "AUTH0CHECKMATE_DEV_CLIENT_SECRET",
+            ],
+          },
+        },
+      ],
+    });
+    expect(finalized.calls[0]?.curl?.script).toContain("--request PATCH");
+  });
+
+  it("refuses to finalize an API plan with incomplete validation coverage", () => {
+    const draft = buildApiPlan(session(), "dev", "2026-07-10T10:06:00.000Z");
+
+    expect(() =>
+      finalizeValidatedApiPlan(
+        draft,
+        {
+          valid: true,
+          profile: "dev",
+          validatedAt: "2026-07-10T10:07:00.000Z",
+          calls: [],
+        },
+        "tenant.auth0.com",
+      ),
+    ).toThrow("did not cover Username-Password-Authentication");
+  });
+
   it("creates a partial client PATCH for application settings", () => {
     const review = session();
     review.decisions = [
@@ -151,7 +207,6 @@ describe("Auth0 API plan", () => {
         checkmateTitle: "Application grant types",
         checkmateStatus: "failed",
         analysis,
-        answers: [],
         actionableChangeId: "action-implicit",
         actionableChanges: [
           {
@@ -179,6 +234,77 @@ describe("Auth0 API plan", () => {
         resourceType: "client",
         bodyStrategy: "merge_live_nested_objects",
         body: { grant_types: ["authorization_code", "refresh_token"] },
+      }),
+    ]);
+  });
+
+  it("merges selected callback removals into one client PATCH", () => {
+    const review = session();
+    const currentCallbacks = [
+      "http://localhost:3000/auth/callback",
+      "http://localhost:4000/auth/callback",
+      "https://assistant.example.com/auth/callback",
+    ];
+    review.decisions = [
+      {
+        checkmateFindingId: "callback-3000",
+        checkmateTitle: "Application Allowed Callbacks",
+        checkmateStatus: "failed",
+        analysis,
+        actionableChangeId: "action-callback-3000",
+        actionableChanges: [
+          {
+            resourceType: "client",
+            resourceId: "client_assistant0",
+            resourceName: "Assistant0",
+            configPath: "callbacks",
+            currentValue: currentCallbacks,
+            targetValue: currentCallbacks.filter(
+              (callback) => !callback.includes("localhost:3000"),
+            ),
+          },
+        ],
+        decision: {
+          status: "approved",
+          rationale: "Remove the local callback.",
+          decidedAt: "2026-07-25T10:00:00.000Z",
+        },
+      },
+      {
+        checkmateFindingId: "callback-4000",
+        checkmateTitle: "Application Allowed Callbacks",
+        checkmateStatus: "failed",
+        analysis,
+        actionableChangeId: "action-callback-4000",
+        actionableChanges: [
+          {
+            resourceType: "client",
+            resourceId: "client_assistant0",
+            resourceName: "Assistant0",
+            configPath: "callbacks",
+            currentValue: currentCallbacks,
+            targetValue: currentCallbacks.filter(
+              (callback) => !callback.includes("localhost:4000"),
+            ),
+          },
+        ],
+        decision: {
+          status: "approved",
+          rationale: "Remove the local callback.",
+          decidedAt: "2026-07-25T10:00:00.000Z",
+        },
+      },
+    ];
+
+    const plan = buildApiPlan(review, "dev", "2026-07-25T10:01:00.000Z");
+
+    expect(plan.calls).toEqual([
+      expect.objectContaining({
+        endpoint: "/api/v2/clients/client_assistant0",
+        actionIds: ["action-callback-3000", "action-callback-4000"],
+        body: {
+          callbacks: ["https://assistant.example.com/auth/callback"],
+        },
       }),
     ]);
   });

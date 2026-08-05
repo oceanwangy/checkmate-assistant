@@ -28,36 +28,36 @@
             target="_blank"
             rel="noreferrer"
           >
-            Review changes
+            Remediation Review
             <span aria-hidden="true">↗</span>
           </a>
         </div>
       </header>
 
       <main>
-        <section class="context-bar" aria-label="Data sources">
-          <div class="context-primary">
-            <span class="eyebrow">CURRENT EVIDENCE</span>
-            <div id="report-title" class="report-title">
-              Loading latest report…
-            </div>
+        <section class="context-bar" aria-label="Run a tenant assessment">
+          <div class="context-primary" aria-live="polite">
+            <span class="eyebrow">SELECTED ASSESSMENT</span>
+            <div id="report-title" class="report-title">Choose a tenant</div>
             <div id="report-detail" class="report-detail">
-              Connecting to CheckMate MCP
+              Run a new CheckMate assessment before starting the conversation.
             </div>
           </div>
-          <div class="source-status" aria-live="polite">
-            <div id="checkmate-status" class="source-chip pending">
-              <span class="source-icon">CM</span>
-              <span><strong>CheckMate</strong><small>Connecting</small></span>
-            </div>
-            <div id="auth0-status" class="source-chip pending">
-              <span class="source-icon auth0">A0</span>
-              <span><strong>Auth0 live</strong><small>Connecting</small></span>
-            </div>
-            <div id="dev-status" class="source-chip pending">
-              <span class="source-icon dev">DEV</span>
-              <span><strong>Dev changes</strong><small>Checking</small></span>
-            </div>
+          <div class="scan-actions" aria-label="CheckMate assessment options">
+            <button id="scan-dev" class="scan-action dev" type="button">
+              <span class="scan-badge">DEV</span>
+              <span class="scan-copy">
+                <strong>Run CheckMate for dev</strong>
+                <small id="scan-dev-detail">Loading dev tenant…</small>
+              </span>
+            </button>
+            <button id="scan-prod" class="scan-action prod" type="button">
+              <span class="scan-badge">PROD</span>
+              <span class="scan-copy">
+                <strong>Run CheckMate for prod</strong>
+                <small id="scan-prod-detail">Loading prod tenant…</small>
+              </span>
+            </button>
           </div>
         </section>
 
@@ -66,10 +66,10 @@
             <span class="eyebrow">ASK YOUR TENANT</span>
             <h1>Turn security findings into clear next steps.</h1>
             <p>
-              Ask in plain language. Answers are grounded in your newest
-              CheckMate report and, when available, live read-only Auth0
-              context. Supported findings can become an exact, confirmed dev API
-              change.
+              Choose development or production above. Each conversation is
+              grounded in the newly generated report. Supported development
+              findings can become an exact, confirmed API change. Production is
+              conversation-only.
             </p>
             <div class="starter-grid" aria-label="Example questions">
               <button

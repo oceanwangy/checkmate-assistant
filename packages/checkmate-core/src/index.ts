@@ -6,6 +6,7 @@ export { rawFindingObjectSchema, rawReportSchema } from "./report-schema.js";
 export type { RawFindingObject } from "./report-schema.js";
 export type {
   AffectedResource,
+  CheckmatePriority,
   FindingStatus,
   LoadedCheckmateReport,
   NormalizedCheckmateFinding,

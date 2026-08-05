@@ -10,6 +10,7 @@ import path from "node:path";
 import { URL } from "node:url";
 import type { CheckmateChatAgent } from "./chat-agent.js";
 import { reportReferenceFromSummary } from "./chat-agent.js";
+import type { CheckmateScanLike, ChatScanProfile } from "./checkmate-scan.js";
 import type { ChatConfig } from "./config.js";
 import type {
   DevRemediationLike,
@@ -19,6 +20,7 @@ import type { McpHubLike } from "./mcp-hub.js";
 import { safeError } from "./sanitize.js";
 import {
   chatRequestSchema,
+  checkmateScanRequestSchema,
   devExecuteRequestSchema,
   devPlanRequestSchema,
 } from "./schema.js";
@@ -32,6 +34,7 @@ const MAX_SESSION_RECOMMENDATIONS = 16;
 const DEV_PLAN_MAX_AGE_MS = 10 * 60 * 1_000;
 
 interface RecommendationContext {
+  profile: "dev";
   reportId: string;
   findingIds: string[];
   createdAt: number;
@@ -51,6 +54,11 @@ interface Session {
   inFlight: boolean;
   recommendations: Map<string, RecommendationContext>;
   plans: Map<string, StoredDevPlan>;
+  activeEnvironment?: {
+    profile: ChatScanProfile;
+    tenantDomain: string;
+    reportId: string;
+  };
 }
 
 interface ChatAgentLike {
@@ -61,6 +69,7 @@ export interface ChatServerOptions {
   config: ChatConfig;
   hub: McpHubLike;
   agent: ChatAgentLike;
+  scanner: CheckmateScanLike;
   remediation?: DevRemediationLike;
 }
 
@@ -162,8 +171,9 @@ function reportCounts(
 }
 
 export function createChatServer(options: ChatServerOptions): Server {
-  const { config, hub, agent, remediation } = options;
+  const { config, hub, agent, remediation, scanner } = options;
   const sessions = new Map<string, Session>();
+  let scanInProgress = false;
   const allowedOrigins = new Set([
     `http://${config.host}:${config.port}`,
     `http://127.0.0.1:${config.port}`,
@@ -230,10 +240,35 @@ export function createChatServer(options: ChatServerOptions): Server {
           : {}),
         confirmationRequired: true,
       },
+      scanTargets: {
+        dev: {
+          ...config.scanTargets.dev,
+          changesSupported: config.devRemediationEnabled,
+        },
+        prod: {
+          ...config.scanTargets.prod,
+          changesSupported: false,
+        },
+      },
+      scanInProgress,
+      ...(session.activeEnvironment
+        ? {
+            activeEnvironment: {
+              ...session.activeEnvironment,
+              changesSupported:
+                session.activeEnvironment.profile === "dev" &&
+                config.devRemediationEnabled,
+            },
+          }
+        : {}),
     };
     try {
-      const summary = await hub.callTool("checkmate_get_report_summary", {});
-      if (!summary.isError) {
+      const summary = session.activeEnvironment
+        ? await hub.callTool("checkmate_get_report_summary", {
+            reportId: session.activeEnvironment.reportId,
+          })
+        : undefined;
+      if (summary && !summary.isError) {
         const report = reportReferenceFromSummary(summary.value);
         if (report) {
           const counts = reportCounts(summary.value);
@@ -244,7 +279,7 @@ export function createChatServer(options: ChatServerOptions): Server {
         }
       }
     } catch {
-      // The MCP connection status remains visible if report loading fails.
+      // Scan controls remain available if the selected report cannot be loaded.
     }
     sendJson(response, 200, { ...status, csrfToken: session.csrfToken });
   }
@@ -274,6 +309,13 @@ export function createChatServer(options: ChatServerOptions): Server {
       });
       return;
     }
+    if (!session.activeEnvironment) {
+      sendJson(response, 409, {
+        error:
+          "Run a new CheckMate scan for the development or production tenant before starting the conversation.",
+      });
+      return;
+    }
     session.inFlight = true;
     try {
       const parsed = chatRequestSchema.safeParse(await readJsonBody(request));
@@ -284,9 +326,22 @@ export function createChatServer(options: ChatServerOptions): Server {
       const result = await agent.answer(
         parsed.data.question,
         parsed.data.history,
+        session.activeEnvironment,
       );
+      if (session.activeEnvironment.profile === "prod") {
+        result.answer.actionConfirmations = [];
+        delete result.remediation;
+      }
       const reportId = result.evidence.report?.reportId;
-      if (result.answer.actionConfirmations.length > 0) {
+      if (reportId !== session.activeEnvironment.reportId) {
+        throw new Error(
+          "The answer was not grounded in the selected CheckMate report.",
+        );
+      }
+      if (
+        session.activeEnvironment.profile === "dev" &&
+        result.answer.actionConfirmations.length > 0
+      ) {
         const planningAvailable = Boolean(
           remediation && config.devPlanningEnabled && reportId,
         );
@@ -300,6 +355,7 @@ export function createChatServer(options: ChatServerOptions): Server {
             }
             const recommendationId = randomBytes(24).toString("base64url");
             session.recommendations.set(recommendationId, {
+              profile: "dev",
               reportId,
               findingIds: [...confirmation.findingIds],
               createdAt: Date.now(),
@@ -354,6 +410,87 @@ export function createChatServer(options: ChatServerOptions): Server {
     return session;
   }
 
+  async function scanResponse(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const session = authenticatedSession(request, response);
+    if (!session) return;
+    if (session.inFlight || scanInProgress) {
+      sendJson(response, 409, {
+        error: "Wait for the current operation to finish before scanning.",
+      });
+      return;
+    }
+    const parsed = checkmateScanRequestSchema.safeParse(
+      await readJsonBody(request),
+    );
+    if (!parsed.success) {
+      sendJson(response, 400, { error: "Select dev or prod to scan." });
+      return;
+    }
+    const target = config.scanTargets[parsed.data.profile];
+    if (!target.configured) {
+      sendJson(response, 400, {
+        error: `The ${parsed.data.profile} CheckMate profile is not fully configured in .env.`,
+      });
+      return;
+    }
+    session.inFlight = true;
+    scanInProgress = true;
+    try {
+      const scanned = await scanner.run(parsed.data.profile);
+      if (
+        scanned.profile !== parsed.data.profile ||
+        (target.tenantDomain && scanned.tenantDomain !== target.tenantDomain)
+      ) {
+        throw new Error(
+          "The completed CheckMate scan did not match the selected tenant.",
+        );
+      }
+      const summary = await hub.callTool("checkmate_get_report_summary", {
+        reportId: scanned.reportId,
+      });
+      if (summary.isError) {
+        throw new Error(
+          "The new CheckMate report could not be read through MCP.",
+        );
+      }
+      const report = reportReferenceFromSummary(summary.value);
+      if (!report || report.reportId !== scanned.reportId) {
+        throw new Error(
+          "MCP did not return the newly generated CheckMate report.",
+        );
+      }
+      session.activeEnvironment = {
+        profile: scanned.profile,
+        tenantDomain: scanned.tenantDomain,
+        reportId: scanned.reportId,
+      };
+      session.recommendations.clear();
+      session.plans.clear();
+      const counts = reportCounts(summary.value);
+      sendJson(response, 200, {
+        scanned: true,
+        activeEnvironment: {
+          ...session.activeEnvironment,
+          changesSupported:
+            scanned.profile === "dev" && config.devRemediationEnabled,
+        },
+        report: {
+          ...report,
+          ...(counts ? { counts } : {}),
+        },
+        scan: scanned,
+      });
+    } catch (error) {
+      sendJson(response, 400, { error: safeError(error) });
+    } finally {
+      scanInProgress = false;
+      session.inFlight = false;
+    }
+  }
+
   async function devPlanResponse(
     request: IncomingMessage,
     response: ServerResponse,
@@ -363,6 +500,12 @@ export function createChatServer(options: ChatServerOptions): Server {
     if (!remediation || !config.devPlanningEnabled) {
       sendJson(response, 400, {
         error: "Dev remediation credentials are not configured.",
+      });
+      return;
+    }
+    if (session.activeEnvironment?.profile !== "dev") {
+      sendJson(response, 400, {
+        error: "Production tenant conversations do not support changes.",
       });
       return;
     }
@@ -384,6 +527,8 @@ export function createChatServer(options: ChatServerOptions): Server {
       );
       if (
         !recommendation ||
+        recommendation.profile !== "dev" ||
+        recommendation.reportId !== session.activeEnvironment.reportId ||
         Date.now() - recommendation.createdAt > RECOMMENDATION_MAX_AGE_MS
       ) {
         sendJson(response, 400, {
@@ -439,6 +584,12 @@ export function createChatServer(options: ChatServerOptions): Server {
     if (!remediation || !config.devRemediationEnabled) {
       sendJson(response, 400, {
         error: "Dev remediation credentials are not configured.",
+      });
+      return;
+    }
+    if (session.activeEnvironment?.profile !== "dev") {
+      sendJson(response, 400, {
+        error: "Production tenant conversations do not support changes.",
       });
       return;
     }
@@ -578,6 +729,10 @@ export function createChatServer(options: ChatServerOptions): Server {
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {
         await chatResponse(request, response);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/scan") {
+        await scanResponse(request, response);
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/dev-plan") {

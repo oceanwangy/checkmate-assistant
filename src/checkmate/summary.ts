@@ -1,30 +1,33 @@
 import type {
   LoadedCheckmateReport,
-  ReportCounts,
+  ReportPriorityCounts,
   ReportSummary,
 } from "./types.js";
 import { displayPath } from "../utils/filesystem.js";
-
-export function countFindings(report: LoadedCheckmateReport): ReportCounts {
-  return report.findings.reduce<ReportCounts>(
-    (counts, finding) => {
-      counts[finding.status] += 1;
-      return counts;
-    },
-    { passed: 0, failed: 0, warning: 0, unknown: 0 },
-  );
-}
 
 export function createReportSummary(
   report: LoadedCheckmateReport,
   tenantOverride?: string,
 ): ReportSummary {
+  const priorities: ReportPriorityCounts = {
+    red: 0,
+    yellow: 0,
+    green: 0,
+    blue: 0,
+    violet: 0,
+    unknown: 0,
+  };
+  const validators = new Map<string, keyof ReportPriorityCounts>();
+  for (const finding of report.findings) {
+    const validatorId = finding.validatorId ?? finding.id;
+    validators.set(validatorId, finding.priority ?? "unknown");
+  }
+  for (const priority of validators.values()) priorities[priority] += 1;
   const summary: ReportSummary = {
-    ...countFindings(report),
     reportPath: report.sourcePath,
-    passedChecksIncluded:
-      !report.findingsOnly ||
-      report.findings.some((item) => item.status === "passed"),
+    reportedValidatorCount: validators.size,
+    detailItemCount: report.findings.length,
+    priorities,
   };
   const tenant = report.tenant ?? tenantOverride;
   if (tenant) summary.tenant = tenant;
@@ -36,16 +39,16 @@ export function formatReportSummary(summary: ReportSummary): string {
   const lines = [
     `Tenant/domain: ${summary.tenant ?? "not included in report"}`,
     `Report timestamp: ${summary.generatedAt ?? "not included in report"}`,
-    `Passed checks: ${summary.passed}`,
-    `Failed checks: ${summary.failed}`,
-    `Warnings: ${summary.warning}`,
+    `Reported validators: ${summary.reportedValidatorCount}`,
+    `High priority (red): ${summary.priorities.red}`,
+    `Moderate priority (yellow): ${summary.priorities.yellow}`,
+    `Low priority (green): ${summary.priorities.green}`,
+    `Information only (blue): ${summary.priorities.blue}`,
+    `GenAI insights (violet): ${summary.priorities.violet}`,
+    `Detail items: ${summary.detailItemCount}`,
   ];
-  if (summary.unknown > 0) lines.push(`Unknown status: ${summary.unknown}`);
-  if (!summary.passedChecksIncluded) {
-    lines.push(
-      "Passed-check note: this findings-only report does not include passed validators.",
-    );
-  }
+  if (summary.priorities.unknown > 0)
+    lines.push(`Unknown priority: ${summary.priorities.unknown}`);
   lines.push(`JSON report: ${displayPath(summary.reportPath)}`);
   return lines.join("\n");
 }

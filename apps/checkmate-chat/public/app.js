@@ -3,6 +3,10 @@ const state = {
   history: [],
   busy: false,
   lastQuestion: "",
+  activeProfile: null,
+  activeReportId: null,
+  scanTargets: null,
+  scanningProfile: null,
 };
 
 const conversation = document.querySelector("#conversation");
@@ -11,6 +15,9 @@ const form = document.querySelector("#chat-form");
 const input = document.querySelector("#question");
 const sendButton = document.querySelector("#send-button");
 const clearButton = document.querySelector("#clear-button");
+const scanDevButton = document.querySelector("#scan-dev");
+const scanProdButton = document.querySelector("#scan-prod");
+const starterButtons = [...document.querySelectorAll("[data-question]")];
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -19,17 +26,71 @@ function element(tag, className, text) {
   return node;
 }
 
-function statusChip(selector, connected, enabled, detail) {
-  const chip = document.querySelector(selector);
-  chip.classList.remove("pending", "unavailable");
-  if (!connected) chip.classList.add("unavailable");
-  const status = chip.querySelector("small");
-  status.textContent = connected
-    ? "Connected · read-only"
-    : enabled
-      ? "Unavailable · optional"
-      : "Disabled · optional";
-  if (detail) chip.title = detail;
+function scanButton(profile) {
+  return profile === "dev" ? scanDevButton : scanProdButton;
+}
+
+function syncControls() {
+  const conversationAvailable = Boolean(state.activeReportId);
+  input.disabled = state.busy || !conversationAvailable;
+  sendButton.disabled = state.busy || !conversationAvailable;
+  input.placeholder = conversationAvailable
+    ? `Ask about the selected ${state.activeProfile} tenant…`
+    : "Run CheckMate for dev or prod to begin";
+  for (const button of starterButtons) {
+    button.disabled = state.busy || !conversationAvailable;
+  }
+  for (const profile of ["dev", "prod"]) {
+    const button = scanButton(profile);
+    const configured = state.scanTargets?.[profile]?.configured ?? false;
+    button.disabled = state.busy || !configured;
+    button.classList.toggle("running", state.scanningProfile === profile);
+  }
+}
+
+function configureScanButton(profile, target) {
+  const detail = document.querySelector(`#scan-${profile}-detail`);
+  if (!target?.configured) {
+    detail.textContent = "Not configured in .env";
+    return;
+  }
+  detail.textContent = `${target.tenantDomain} · ${profile === "dev" ? "confirmed changes supported" : "conversation only"}`;
+}
+
+function renderSelectedReport(report, environment) {
+  state.activeProfile = environment?.profile ?? null;
+  state.activeReportId = report?.reportId ?? null;
+  if (!report || !environment) {
+    document.querySelector("#report-title").textContent = "Choose a tenant";
+    document.querySelector("#report-detail").textContent =
+      "Run a new CheckMate assessment before starting the conversation.";
+    syncControls();
+    return;
+  }
+  document.querySelector("#report-title").textContent =
+    `${environment.profile.toUpperCase()} · ${environment.tenantDomain}`;
+  const details = [report.reportId];
+  if (report.generatedAt) {
+    const generated = new Date(report.generatedAt);
+    details.push(
+      Number.isNaN(generated.getTime())
+        ? report.generatedAt
+        : generated.toLocaleString(),
+    );
+  }
+  if (report.counts) {
+    details.push(
+      `${report.counts.failed} failed`,
+      `${report.counts.warning} warnings`,
+    );
+  }
+  details.push(
+    environment.profile === "dev"
+      ? "confirmed changes supported"
+      : "conversation only",
+  );
+  document.querySelector("#report-detail").textContent = details.join(" · ");
+  syncControls();
 }
 
 async function loadStatus() {
@@ -41,66 +102,17 @@ async function loadStatus() {
     if (!response.ok) throw new Error("Status could not be loaded.");
     const status = await response.json();
     state.csrfToken = status.csrfToken;
-    statusChip(
-      "#checkmate-status",
-      status.checkmate.connected,
-      status.checkmate.enabled,
-      status.checkmate.error,
-    );
-    statusChip(
-      "#auth0-status",
-      status.auth0.connected,
-      status.auth0.enabled,
-      status.auth0.error,
-    );
-    const devChip = document.querySelector("#dev-status");
-    devChip.classList.remove("pending", "unavailable");
-    if (!status.devRemediation.enabled) devChip.classList.add("unavailable");
-    devChip.querySelector("small").textContent = status.devRemediation.enabled
-      ? `${status.devRemediation.tenantDomain} · confirm to write`
-      : "Execution disabled";
-    devChip.title = status.devRemediation.enabled
-      ? "Only validated, explicitly confirmed development plans can be executed."
-      : status.devRemediation.disabledReason;
-    if (status.report) {
-      document.querySelector("#report-title").textContent =
-        status.report.reportId;
-      const counts = status.report.counts;
-      const details = [];
-      if (status.report.generatedAt) {
-        const generated = new Date(status.report.generatedAt);
-        details.push(
-          Number.isNaN(generated.getTime())
-            ? status.report.generatedAt
-            : generated.toLocaleString(),
-        );
-      }
-      if (counts) {
-        details.push(`${counts.failed} failed`, `${counts.warning} warnings`);
-      } else if (typeof status.report.totalFindings === "number") {
-        details.push(`${status.report.totalFindings} findings`);
-      }
-      if (status.report.findingsOnly) details.push("findings-only report");
-      if (status.report.stale) details.push("stale");
-      document.querySelector("#report-detail").textContent =
-        details.join(" · ");
-    } else {
-      document.querySelector("#report-title").textContent =
-        "No readable CheckMate report";
-      document.querySelector("#report-detail").textContent =
-        "Run a fresh scan, then refresh this page.";
-    }
+    state.scanTargets = status.scanTargets;
+    configureScanButton("dev", status.scanTargets.dev);
+    configureScanButton("prod", status.scanTargets.prod);
+    renderSelectedReport(status.report, status.activeEnvironment);
     const remediation = document.querySelector("#remediation-link");
     remediation.href = status.remediationUrl;
   } catch (error) {
     document.querySelector("#report-title").textContent = "Chatbot unavailable";
     document.querySelector("#report-detail").textContent = error.message;
-    statusChip("#checkmate-status", false, true, error.message);
-    statusChip("#auth0-status", false, true, error.message);
-    const devChip = document.querySelector("#dev-status");
-    devChip.classList.remove("pending");
-    devChip.classList.add("unavailable");
-    devChip.querySelector("small").textContent = "Status unavailable";
+    state.scanTargets = null;
+    syncControls();
   }
 }
 
@@ -344,6 +356,15 @@ function addAnswer(result) {
   return card;
 }
 
+function resetConversation() {
+  state.history = [];
+  state.lastQuestion = "";
+  conversation.replaceChildren();
+  welcome.hidden = false;
+  input.value = "";
+  resizeInput();
+}
+
 async function postJson(path, body) {
   const response = await fetch(path, {
     method: "POST",
@@ -357,6 +378,36 @@ async function postJson(path, body) {
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error ?? "The request failed.");
   return result;
+}
+
+async function runScan(profile) {
+  if (state.busy) return;
+  if (!state.csrfToken) await loadStatus();
+  if (!state.scanTargets?.[profile]?.configured) return;
+  state.busy = true;
+  state.scanningProfile = profile;
+  document.querySelector("#report-title").textContent =
+    `Running CheckMate for ${profile.toUpperCase()}…`;
+  document.querySelector("#report-detail").textContent =
+    `Creating a new report for ${state.scanTargets[profile].tenantDomain}.`;
+  syncControls();
+  try {
+    const result = await postJson("/api/scan", { profile });
+    resetConversation();
+    renderSelectedReport(result.report, result.activeEnvironment);
+  } catch (error) {
+    await loadStatus();
+    if (!state.activeReportId) {
+      document.querySelector("#report-title").textContent =
+        "CheckMate scan failed";
+    }
+    document.querySelector("#report-detail").textContent = error.message;
+  } finally {
+    state.busy = false;
+    state.scanningProfile = null;
+    syncControls();
+    if (state.activeReportId) input.focus();
+  }
 }
 
 function requestPreview(call) {
@@ -556,7 +607,7 @@ function renderDevPlan(shell, plan, onResolved) {
       );
     } finally {
       state.busy = false;
-      sendButton.disabled = false;
+      syncControls();
       scrollToLatest();
     }
   });
@@ -617,6 +668,11 @@ async function ask(rawQuestion, retry = false) {
     await loadStatus();
     if (!state.csrfToken) return;
   }
+  if (!state.activeReportId) {
+    document.querySelector("#report-detail").textContent =
+      "Run CheckMate for dev or prod before asking a question.";
+    return;
+  }
   state.busy = true;
   state.lastQuestion = question;
   sendButton.disabled = true;
@@ -652,8 +708,8 @@ async function ask(rawQuestion, retry = false) {
     addError(error.message, question);
   } finally {
     state.busy = false;
-    sendButton.disabled = false;
-    input.focus();
+    syncControls();
+    if (state.activeReportId) input.focus();
     scrollToLatest();
   }
 }
@@ -671,19 +727,18 @@ input.addEventListener("keydown", (event) => {
   }
 });
 
-for (const button of document.querySelectorAll("[data-question]")) {
+for (const button of starterButtons) {
   button.addEventListener("click", () => ask(button.dataset.question));
 }
 
+scanDevButton.addEventListener("click", () => runScan("dev"));
+scanProdButton.addEventListener("click", () => runScan("prod"));
+
 clearButton.addEventListener("click", () => {
   if (state.busy) return;
-  state.history = [];
-  state.lastQuestion = "";
-  conversation.replaceChildren();
-  welcome.hidden = false;
-  input.value = "";
-  resizeInput();
+  resetConversation();
   window.scrollTo({ top: 0, behavior: "smooth" });
 });
 
+syncControls();
 loadStatus();

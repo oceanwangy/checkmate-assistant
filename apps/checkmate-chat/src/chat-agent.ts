@@ -59,6 +59,12 @@ export interface ChatModel {
   create(request: ModelRequest): Promise<ModelTurn>;
 }
 
+export interface ChatAnswerContext {
+  profile: "dev" | "prod";
+  reportId: string;
+  tenantDomain: string;
+}
+
 export class OpenAiChatModel implements ChatModel {
   private readonly client: OpenAI;
 
@@ -192,6 +198,21 @@ function isPrimaryCheckmateQuery(name: string): boolean {
   ].includes(name);
 }
 
+function bindCheckmateReport(
+  toolName: string,
+  args: Record<string, unknown>,
+  reportId?: string,
+): Record<string, unknown> {
+  if (
+    !reportId ||
+    !toolName.startsWith("checkmate_") ||
+    toolName === "checkmate_list_reports"
+  ) {
+    return args;
+  }
+  return { ...args, reportId };
+}
+
 function stripSdkParserMetadata(value: unknown): void {
   if (Array.isArray(value)) {
     for (const item of value) stripSdkParserMetadata(item);
@@ -283,12 +304,15 @@ export class CheckmateChatAgent {
   async answer(
     question: string,
     history: ChatHistoryMessage[] = [],
+    context?: ChatAnswerContext,
   ): Promise<ChatResult> {
     const uses: ToolUseRecord[] = [];
-    const summary = await this.hub.callTool("checkmate_get_report_summary", {});
+    const summary = await this.hub.callTool("checkmate_get_report_summary", {
+      ...(context ? { reportId: context.reportId } : {}),
+    });
     uses.push(toolRecord(summary));
     if (summary.isError) {
-      throw new Error("The newest CheckMate report could not be read.");
+      throw new Error("The selected CheckMate report could not be read.");
     }
     const report = findReport(summary.value);
     const status = this.hub.getStatus();
@@ -299,7 +323,17 @@ export class CheckmateChatAgent {
         role: "developer",
         content: JSON.stringify({
           sessionContext: {
-            newestCheckmateReport: summary.value,
+            selectedCheckmateReport: summary.value,
+            selectedEnvironment: context
+              ? {
+                  profile: context.profile,
+                  tenantDomain: context.tenantDomain,
+                  remediation:
+                    context.profile === "dev"
+                      ? "Supported changes may be prepared only after explicit user approval."
+                      : "Conversation only. Do not offer, prepare, or imply configuration changes.",
+                }
+              : undefined,
             auth0LiveMcp: status.auth0.connected
               ? "Available with an enforced read-only tool allowlist."
               : "Unavailable. Do not make live-tenant claims.",
@@ -308,7 +342,10 @@ export class CheckmateChatAgent {
       },
       { type: "message", role: "user", content: question },
     ];
-    let tools = this.hub.getTools().map(toOpenAiTool);
+    let tools = this.hub
+      .getTools()
+      .filter((tool) => !context || tool.name !== "checkmate_list_reports")
+      .map(toOpenAiTool);
     let callCount = 0;
 
     for (let round = 0; round < MAX_MODEL_ROUNDS; round += 1) {
@@ -330,6 +367,7 @@ export class CheckmateChatAgent {
           ...new Set(uses.flatMap((use) => use.findingIds)),
         ];
         const answer = cleanAnswerForDisplay(parsed.data, evidenceFindingIds);
+        if (context?.profile === "prod") answer.actionConfirmations = [];
         return {
           answer,
           evidence: {
@@ -349,7 +387,11 @@ export class CheckmateChatAgent {
         try {
           const result = await this.hub.callTool(
             call.name,
-            toolArguments(call.arguments),
+            bindCheckmateReport(
+              call.name,
+              toolArguments(call.arguments),
+              context?.reportId,
+            ),
           );
           uses.push(toolRecord(result));
           output = result.value;

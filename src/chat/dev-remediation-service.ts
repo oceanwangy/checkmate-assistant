@@ -155,7 +155,7 @@ function changeDescription(change: ActionableChange): string {
   switch (change.configPath) {
     case "jwt_configuration.alg":
       return `Set JWT signing to ${String(change.targetValue)} on ${change.resourceName}.`;
-    case "cross_origin_auth":
+    case "cross_origin_authentication":
       return `Disable cross-origin authentication on ${change.resourceName}.`;
     case "grant_types":
       return `Remove the Implicit grant type from ${change.resourceName}.`;
@@ -214,15 +214,18 @@ export async function prepareChatDevPlan(
     );
   }
   const generatedAt = now().toISOString();
-  const plan = buildApiPlanFromActions(
-    input.reportId,
-    "dev",
-    generatedAt,
-    candidates.map((candidate) => ({
-      actionId: candidate.actionId,
-      change: candidate.change,
-    })),
-  );
+  const plan = apiPlanSchema.parse({
+    ...buildApiPlanFromActions(
+      input.reportId,
+      "dev",
+      generatedAt,
+      candidates.map((candidate) => ({
+        actionId: candidate.actionId,
+        change: candidate.change,
+      })),
+    ),
+    tenantDomain: devConfig.domain,
+  });
   const validation = await validateApiPlan(plan, devConfig, {
     includeRequestBodies: true,
     now,
