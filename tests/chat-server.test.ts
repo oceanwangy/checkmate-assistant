@@ -6,7 +6,7 @@ import type {
   DevRemediationLike,
   PreparedDevPlanState,
 } from "../apps/checkmate-chat/src/dev-remediation.js";
-import type { McpHubLike } from "../apps/checkmate-chat/src/mcp-hub.js";
+import type { ToolHubLike } from "../apps/checkmate-chat/src/tool-hub.js";
 import { createChatServer } from "../apps/checkmate-chat/src/server.js";
 
 const servers: http.Server[] = [];
@@ -75,7 +75,6 @@ describe("chat dev confirmation workflow", () => {
       projectRoot: "/project",
       publicDirectory: "/project/public",
       reportsDirectory: "/project/reports",
-      checkmateServerPath: "/project/checkmate.js",
       host: "127.0.0.1",
       port: 4320,
       model: "gpt-5.5",
@@ -93,7 +92,7 @@ describe("chat dev confirmation workflow", () => {
       devPlanningEnabled: true,
       devRemediationEnabled: true,
     };
-    const hub: McpHubLike = {
+    const hub: ToolHubLike = {
       initialize: () => Promise.resolve(),
       close: () => Promise.resolve(),
       getTools: () => [],

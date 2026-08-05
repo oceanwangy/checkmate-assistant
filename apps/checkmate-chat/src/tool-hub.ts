@@ -6,6 +6,10 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ChatConfig } from "./config.js";
 import { AUTH0_READ_ONLY_TOOLS } from "./config.js";
+import {
+  CheckmateReportTools,
+  isCheckmateToolName,
+} from "./checkmate-tools.js";
 import { safeError, sanitizeToolResult } from "./sanitize.js";
 import type {
   McpCallResult,
@@ -13,17 +17,7 @@ import type {
   McpToolDefinition,
 } from "./types.js";
 
-const CHECKMATE_TOOLS = new Set([
-  "checkmate_list_reports",
-  "checkmate_get_report_summary",
-  "checkmate_search_findings",
-  "checkmate_get_finding",
-  "checkmate_get_application_posture",
-  "checkmate_get_security_topic_context",
-]);
 const AUTH0_TOOLS = new Set<string>(AUTH0_READ_ONLY_TOOLS);
-
-type ServerName = "checkmate" | "auth0";
 
 interface ConnectedServer {
   client: Client;
@@ -64,7 +58,7 @@ function isErrorResult(result: unknown): boolean {
   );
 }
 
-export interface McpHubLike {
+export interface ToolHubLike {
   initialize(): Promise<void>;
   close(): Promise<void>;
   getTools(): McpToolDefinition[];
@@ -75,13 +69,15 @@ export interface McpHubLike {
   callTool(name: string, args: Record<string, unknown>): Promise<McpCallResult>;
 }
 
-export class McpHub implements McpHubLike {
-  private readonly servers = new Map<ServerName, ConnectedServer>();
-  private readonly statuses: Record<ServerName, McpServerStatus>;
+export class ToolHub implements ToolHubLike {
+  private readonly checkmate: CheckmateReportTools;
+  private auth0Server: ConnectedServer | undefined;
+  private readonly statuses: Record<"checkmate" | "auth0", McpServerStatus>;
 
   constructor(private readonly config: ChatConfig) {
+    this.checkmate = new CheckmateReportTools(config.reportsDirectory);
     this.statuses = {
-      checkmate: { enabled: true, connected: false, readOnly: true },
+      checkmate: { enabled: true, connected: true, readOnly: true },
       auth0: {
         enabled: config.auth0Enabled,
         connected: false,
@@ -91,58 +87,33 @@ export class McpHub implements McpHubLike {
   }
 
   async initialize(): Promise<void> {
-    await this.connect(
-      "checkmate",
-      {
-        command: process.execPath,
-        args: [
-          this.config.checkmateServerPath,
-          "--reports-dir",
-          this.config.reportsDirectory,
-        ],
+    if (!this.config.auth0Enabled) return;
+    try {
+      await this.connectAuth0({
+        command: this.config.auth0Command,
+        args: this.config.auth0Arguments,
         cwd: this.config.projectRoot,
-        env: getDefaultEnvironment(),
+        env: {
+          ...getDefaultEnvironment(),
+          AUTH0_MCP_ANALYTICS: "false",
+          AUTH0_MCP_READ_ONLY: "true",
+          AUTH0_MCP_TOOLS: AUTH0_READ_ONLY_TOOLS.join(","),
+        },
         stderr: "pipe",
-      },
-      CHECKMATE_TOOLS,
-    );
-
-    if (this.config.auth0Enabled) {
-      try {
-        await this.connect(
-          "auth0",
-          {
-            command: this.config.auth0Command,
-            args: this.config.auth0Arguments,
-            cwd: this.config.projectRoot,
-            env: {
-              ...getDefaultEnvironment(),
-              AUTH0_MCP_ANALYTICS: "false",
-              AUTH0_MCP_READ_ONLY: "true",
-              AUTH0_MCP_TOOLS: AUTH0_READ_ONLY_TOOLS.join(","),
-            },
-            stderr: "pipe",
-          },
-          AUTH0_TOOLS,
-        );
-      } catch (error) {
-        this.statuses.auth0 = {
-          enabled: true,
-          connected: false,
-          readOnly: true,
-          error: safeError(error),
-        };
-      }
+      });
+    } catch (error) {
+      this.statuses.auth0 = {
+        enabled: true,
+        connected: false,
+        readOnly: true,
+        error: safeError(error),
+      };
     }
   }
 
-  private async connect(
-    name: ServerName,
-    parameters: StdioServerParameters,
-    allowlist: ReadonlySet<string>,
-  ): Promise<void> {
+  private async connectAuth0(parameters: StdioServerParameters): Promise<void> {
     const client = new Client({
-      name: `checkmate-chat-${name}-client`,
+      name: "checkmate-chat-auth0-client",
       version: "0.1.0",
     });
     const transport = new StdioClientTransport(parameters);
@@ -154,34 +125,29 @@ export class McpHub implements McpHubLike {
       await client.connect(transport);
       const listed = await client.listTools();
       const tools = listed.tools
-        .filter((tool) => allowlist.has(tool.name))
+        .filter((tool) => AUTH0_TOOLS.has(tool.name))
         .map((tool): McpToolDefinition => {
           const definition: McpToolDefinition = {
-            server: name,
+            server: "auth0",
             name: tool.name,
             inputSchema: tool.inputSchema,
           };
           if (tool.description) definition.description = tool.description;
           return definition;
         });
-      if (name === "checkmate" && tools.length !== allowlist.size) {
-        throw new Error(
-          `CheckMate MCP advertised ${tools.length} of ${allowlist.size} expected read-only tools.`,
-        );
-      }
-      this.servers.set(name, { client, transport, tools });
-      this.statuses[name] = {
+      this.auth0Server = { client, transport, tools };
+      this.statuses.auth0 = {
         enabled: true,
         connected: true,
         readOnly: true,
       };
       transport.onclose = () => {
-        this.servers.delete(name);
-        this.statuses[name] = {
+        this.auth0Server = undefined;
+        this.statuses.auth0 = {
           enabled: true,
           connected: false,
           readOnly: true,
-          error: "The MCP server disconnected.",
+          error: "The Auth0 MCP server disconnected.",
         };
       };
     } catch (error) {
@@ -192,7 +158,7 @@ export class McpHub implements McpHubLike {
   }
 
   getTools(): McpToolDefinition[] {
-    return [...this.servers.values()].flatMap((server) => server.tools);
+    return [...this.checkmate.getTools(), ...(this.auth0Server?.tools ?? [])];
   }
 
   getStatus(): {
@@ -209,45 +175,45 @@ export class McpHub implements McpHubLike {
     name: string,
     args: Record<string, unknown>,
   ): Promise<McpCallResult> {
-    const serverName: ServerName | undefined = CHECKMATE_TOOLS.has(name)
-      ? "checkmate"
-      : AUTH0_TOOLS.has(name)
-        ? "auth0"
-        : undefined;
-    if (!serverName) {
+    if (isCheckmateToolName(name)) {
+      const result = await this.checkmate.call(name, args);
+      return {
+        server: "checkmate",
+        tool: name,
+        isError: result.isError,
+        value: sanitizeToolResult(result.value),
+      };
+    }
+    if (!AUTH0_TOOLS.has(name)) {
       throw new Error(
         `Tool ${name} is not on the chatbot read-only allowlist.`,
       );
     }
-    const server = this.servers.get(serverName);
+    const server = this.auth0Server;
     if (!server || !server.tools.some((tool) => tool.name === name)) {
-      throw new Error(`${serverName} MCP tool ${name} is unavailable.`);
+      throw new Error(`auth0 MCP tool ${name} is unavailable.`);
     }
     const result = await server.client.callTool({ name, arguments: args });
     return {
-      server: serverName,
+      server: "auth0",
       tool: name,
       isError: isErrorResult(result),
       value: sanitizeToolResult(extractResult(result), {
-        maskPersonalData: serverName === "auth0",
+        maskPersonalData: true,
       }),
     };
   }
 
   async close(): Promise<void> {
-    const connections = [...this.servers.values()];
-    this.servers.clear();
-    await Promise.allSettled(
-      connections.map(async ({ client }) => {
-        await client.close();
-      }),
-    );
-    for (const name of ["checkmate", "auth0"] as const) {
-      this.statuses[name] = {
-        enabled: name === "checkmate" || this.config.auth0Enabled,
-        connected: false,
-        readOnly: true,
-      };
+    const server = this.auth0Server;
+    this.auth0Server = undefined;
+    if (server) {
+      await server.client.close().catch(() => undefined);
     }
+    this.statuses.auth0 = {
+      enabled: this.config.auth0Enabled,
+      connected: false,
+      readOnly: true,
+    };
   }
 }

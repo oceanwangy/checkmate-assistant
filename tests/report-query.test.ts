@@ -5,7 +5,7 @@ import {
   findTopicFindings,
   searchFindings,
   toFindingView,
-} from "../packages/checkmate-mcp-server/src/query.js";
+} from "@checkmate-assistant/core";
 
 const findings: NormalizedCheckmateFinding[] = [
   {
@@ -50,7 +50,7 @@ const findings: NormalizedCheckmateFinding[] = [
   },
 ];
 
-describe("MCP report queries", () => {
+describe("report queries", () => {
   it("searches non-passing findings by default and ranks matches", () => {
     expect(searchFindings(findings, { query: "breached password" })).toEqual([
       expect.objectContaining({ findingId: "breached-password" }),

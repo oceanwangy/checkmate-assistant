@@ -1,8 +1,5 @@
-import type {
-  FindingStatus,
-  NormalizedCheckmateFinding,
-} from "@checkmate-assistant/core";
-import { redactSensitive } from "./security.js";
+import type { FindingStatus, NormalizedCheckmateFinding } from "./types.js";
+import { redactSensitive } from "./redaction.js";
 
 export interface FindingView {
   findingId: string;

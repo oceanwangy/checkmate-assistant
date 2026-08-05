@@ -1,9 +1,7 @@
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import {
-  loadCheckmateReport,
-  type LoadedCheckmateReport,
-} from "@checkmate-assistant/core";
+import type { LoadedCheckmateReport } from "./types.js";
+import { loadCheckmateReport } from "./report-loader.js";
 
 const DEFAULT_MAX_REPORT_BYTES = 25 * 1024 * 1024;
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;

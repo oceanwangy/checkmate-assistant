@@ -5,7 +5,7 @@ import { CheckmateChatAgent } from "./chat-agent.js";
 import { CheckmateScanCoordinator } from "./checkmate-scan.js";
 import { defaultProjectRoot, loadChatConfig } from "./config.js";
 import { DevRemediationCoordinator } from "./dev-remediation.js";
-import { McpHub } from "./mcp-hub.js";
+import { ToolHub } from "./tool-hub.js";
 import { createChatServer } from "./server.js";
 
 function valueAfter(args: string[], index: number, option: string): string {
@@ -60,7 +60,7 @@ async function main(): Promise<void> {
   const projectRoot = defaultProjectRoot();
   dotenv.config({ path: path.resolve(projectRoot, ".env"), quiet: true });
   const config = loadChatConfig(commandEnvironment(process.argv.slice(2)));
-  const hub = new McpHub(config);
+  const hub = new ToolHub(config);
   await hub.initialize();
   const agent = new CheckmateChatAgent(hub, config);
   const remediation = new DevRemediationCoordinator(config);
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
   process.stdout.write(
     [
       `CheckMate chatbot: http://${config.host}:${config.port}`,
-      `CheckMate MCP: ${status.checkmate.connected ? "connected" : "unavailable"}`,
+      `CheckMate reports: read in-process from ${config.reportsDirectory}`,
       `Auth0 MCP: ${status.auth0.connected ? "connected (read-only)" : status.auth0.enabled ? "unavailable; report-only answers remain available" : "disabled"}`,
       `Dev remediation: ${config.devRemediationEnabled ? `planning and execution enabled for ${config.devTenantDomain ?? "configured tenant"} with confirmation` : config.devPlanningEnabled ? `API planning enabled; execution disabled; ${config.devRemediationDisabledReason ?? "configure the dev write boundary"}` : `planning and execution disabled; ${config.devRemediationDisabledReason ?? "configure the dev tenant"}`}`,
       "Press Ctrl+C to stop.",

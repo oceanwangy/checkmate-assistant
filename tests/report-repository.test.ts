@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ReportRepository } from "../packages/checkmate-mcp-server/src/report-repository.js";
+import { ReportRepository } from "@checkmate-assistant/core";
 
 async function writeReport(
   directory: string,
@@ -12,7 +12,7 @@ async function writeReport(
   await writeFile(path.join(directory, filename), JSON.stringify(report));
 }
 
-describe("MCP report repository", () => {
+describe("report repository", () => {
   it("loads a selected report and records findings-only coverage", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-mcp-"));
     await writeReport(directory, "report.json", [

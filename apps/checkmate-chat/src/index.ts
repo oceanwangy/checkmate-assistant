@@ -8,8 +8,9 @@ export type {
   ChatScanProfile,
   ChatScanResult,
 } from "./checkmate-scan.js";
-export { McpHub } from "./mcp-hub.js";
-export type { McpHubLike } from "./mcp-hub.js";
+export { ToolHub } from "./tool-hub.js";
+export type { ToolHubLike } from "./tool-hub.js";
+export { CheckmateReportTools } from "./checkmate-tools.js";
 export { DevRemediationCoordinator } from "./dev-remediation.js";
 export type {
   DevRemediationLike,

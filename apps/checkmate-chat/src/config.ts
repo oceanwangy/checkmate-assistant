@@ -20,7 +20,6 @@ export interface ChatConfig {
   projectRoot: string;
   publicDirectory: string;
   reportsDirectory: string;
-  checkmateServerPath: string;
   host: "127.0.0.1" | "localhost";
   port: number;
   model: string;
@@ -124,10 +123,6 @@ export function loadChatConfig(
     reportsDirectory: resolveFromProject(
       projectRoot,
       env.CHECKMATE_REPORTS_DIR ?? "reports",
-    ),
-    checkmateServerPath: path.resolve(
-      projectRoot,
-      "packages/checkmate-mcp-server/dist/cli.js",
     ),
     host,
     port,

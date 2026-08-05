@@ -16,7 +16,7 @@ import type {
   DevRemediationLike,
   PreparedDevPlanState,
 } from "./dev-remediation.js";
-import type { McpHubLike } from "./mcp-hub.js";
+import type { ToolHubLike } from "./tool-hub.js";
 import { safeError } from "./sanitize.js";
 import {
   chatRequestSchema,
@@ -67,7 +67,7 @@ interface ChatAgentLike {
 
 export interface ChatServerOptions {
   config: ChatConfig;
-  hub: McpHubLike;
+  hub: ToolHubLike;
   agent: ChatAgentLike;
   scanner: CheckmateScanLike;
   remediation?: DevRemediationLike;
@@ -452,14 +452,12 @@ export function createChatServer(options: ChatServerOptions): Server {
         reportId: scanned.reportId,
       });
       if (summary.isError) {
-        throw new Error(
-          "The new CheckMate report could not be read through MCP.",
-        );
+        throw new Error("The new CheckMate report could not be read.");
       }
       const report = reportReferenceFromSummary(summary.value);
       if (!report || report.reportId !== scanned.reportId) {
         throw new Error(
-          "MCP did not return the newly generated CheckMate report.",
+          "The newly generated CheckMate report could not be selected.",
         );
       }
       session.activeEnvironment = {

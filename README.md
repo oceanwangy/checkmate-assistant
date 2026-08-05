@@ -1,6 +1,6 @@
 # Checkmate Remediation Assistant
 
-`checkmate-assistant` combines two separate capabilities: a deterministic remediation UI, and an AI chatbot backed by the read-only CheckMate MCP server. The remediation workflow runs CheckMate, verifies supported settings against the live tenant, creates reviewed deployment artifacts, and restricts tenant writes to explicitly confirmed development execution. The chatbot uses OpenAI only for natural-language conversation over bounded MCP evidence.
+`checkmate-assistant` combines two separate capabilities: a deterministic remediation UI, and an AI chatbot grounded in read-only CheckMate report evidence. The remediation workflow runs CheckMate, verifies supported settings against the live tenant, creates reviewed deployment artifacts, and restricts tenant writes to explicitly confirmed development execution. The chatbot uses OpenAI only for natural-language conversation over bounded report and live read-only evidence.
 
 ## Architecture
 
@@ -166,11 +166,11 @@ checkmate-assistant --help
 
 ## One-page security chatbot
 
-The customer-facing chatbot under `apps/checkmate-chat` turns natural-language security questions into short, evidence-backed answers. It connects to two separate MCP servers:
+The customer-facing chatbot under `apps/checkmate-chat` turns natural-language security questions into short, evidence-backed answers. Report evidence is read in-process; the official Auth0 MCP Server is the only MCP connection:
 
 ```text
 Browser → local chatbot backend → gpt-5.5 (high reasoning)
-                                ├── CheckMate MCP (required report evidence)
+                                ├── in-process CheckMate report tools (required report evidence)
                                 ├── Auth0 MCP (optional live read-only context)
                                 └── deterministic dev remediation controller
                                       ↓
@@ -181,9 +181,9 @@ Browser → local chatbot backend → gpt-5.5 (high reasoning)
                                   dev-only executor and verification
 ```
 
-The chatbot starts with two explicit assessment actions: `Run CheckMate for dev` and `Run CheckMate for prod`. Each action creates a new CheckMate report and binds the browser session to that exact report ID. Every subsequent MCP lookup is forced to the selected report, so development and production evidence cannot be mixed by a generic “latest report” lookup. Development conversations may offer supported, separately confirmed changes. Production conversations are advisory only and cannot create or execute remediation plans.
+The chatbot starts with two explicit assessment actions: `Run CheckMate for dev` and `Run CheckMate for prod`. Each action creates a new CheckMate report and binds the browser session to that exact report ID. Every subsequent report lookup is forced to the selected report, so development and production evidence cannot be mixed by a generic “latest report” lookup. Development conversations may offer supported, separately confirmed changes. Production conversations are advisory only and cannot create or execute remediation plans.
 
-After a scan, the chatbot can search findings, inspect application posture, or collect security-topic context. When the official Auth0 MCP Server is authenticated, it may also read applications and logs to close a useful evidence gap. Only these four Auth0 tools are allowed: `auth0_list_logs`, `auth0_get_log`, `auth0_list_applications`, and `auth0_get_application`. CheckMate execution belongs to the chatbot backend rather than the MCP server; the CheckMate MCP remains a read-only report interface.
+After a scan, the chatbot can search findings, inspect application posture, or collect security-topic context through read-only in-process report tools backed by the shared `@checkmate-assistant/core` query library. When the official Auth0 MCP Server is authenticated, it may also read applications and logs to close a useful evidence gap. Only these four Auth0 tools are allowed: `auth0_list_logs`, `auth0_get_log`, `auth0_list_applications`, and `auth0_get_application`. CheckMate execution belongs to the chatbot backend; the report tools remain a read-only report interface.
 
 The official Auth0 MCP authentication is the only additional manual setup. Run it once and complete the browser/device login:
 
@@ -203,7 +203,7 @@ Open `http://127.0.0.1:4320`, then run a fresh development or production assessm
 - “What are the most important security weaknesses in this tenant?”
 - “How should I harden the GrantMate application?”
 
-Each answer shows whether a statement is based on CheckMate report evidence, live Auth0 data, or general guidance. The evidence drawer lists the exact report, finding IDs, and MCP tools used. Raw reports are never sent to OpenAI; only bounded, normalised MCP results are sent. Auth0 secrets, tokens, email addresses, and full IP addresses are redacted. Requests use `store: false`.
+Each answer shows whether a statement is based on CheckMate report evidence, live Auth0 data, or general guidance. The evidence drawer lists the exact report, finding IDs, and tools used. Raw reports are never sent to OpenAI; only bounded, normalised tool results are sent. Auth0 secrets, tokens, email addresses, and full IP addresses are redacted. Requests use `store: false`.
 
 For a concrete recommendation that maps to a supported action, the backend reads the matching live development configuration and builds the Management API plan deterministically. The AI cannot supply an endpoint or request body. The page displays every `PATCH` URL, affected setting, before/after value, and the request body. Sensitive live values are redacted in the browser, while the confirmation remains bound to a SHA-256 digest of the complete request.
 
@@ -213,43 +213,9 @@ Only `AUTH0CHECKMATE_DEV_*` credentials are loaded by this path. Read-only API p
 
 The local HTTP service binds to loopback, checks the request host and origin, and uses a session-specific CSRF token.
 
-## CheckMate MCP Server
+## CheckMate report tools
 
-The repository also contains an independent, read-only MCP server under `packages/checkmate-mcp-server`. It gives an MCP host structured access to CheckMate reports so the host's AI can answer questions such as:
-
-- “I recently experienced credential stuffing. Which controls should I review?”
-- “How can I harden the security posture of Example SPA?”
-- “What are the most important failed controls in the latest report?”
-
-The MCP server does not call OpenAI, authenticate to Auth0, execute CheckMate, or change a tenant. It reads JSON files only from its configured `reports` directory. The MCP host supplies the AI reasoning. This keeps report evidence and AI interpretation as separate layers.
-
-Build and start it over stdio:
-
-```sh
-npm run build
-npm run mcp -- --reports-dir ./reports
-```
-
-MCP hosts normally start stdio servers themselves. Configure the built server with absolute paths:
-
-```json
-{
-  "mcpServers": {
-    "checkmate": {
-      "command": "node",
-      "args": [
-        "/absolute/path/to/checkmate-assistant/packages/checkmate-mcp-server/dist/cli.js",
-        "--reports-dir",
-        "/absolute/path/to/checkmate-assistant/reports"
-      ]
-    }
-  }
-}
-```
-
-It can run alone. If the official Auth0 MCP Server is also configured, add it as a separate sibling entry in the MCP host; neither server depends on the other. CheckMate supplies report posture and finding provenance, while the Auth0 server may supply separately authorised live resources or logs. Follow the [official Auth0 MCP Server setup](https://github.com/auth0/auth0-mcp-server#readme) for that optional server.
-
-The CheckMate MCP server exposes:
+The chatbot's report evidence comes from six read-only in-process tools implemented over the shared `@checkmate-assistant/core` query library:
 
 - `checkmate_list_reports`
 - `checkmate_get_report_summary`
@@ -258,15 +224,7 @@ The CheckMate MCP server exposes:
 - `checkmate_get_application_posture`
 - `checkmate_get_security_topic_context`
 
-It also exposes the `checkmate://reports/latest/summary` resource and reusable `investigate-security-question` and `harden-application` prompts. The newest valid JSON report is selected when `reportId` is omitted. Tool responses include report and finding IDs, freshness, findings-only coverage warnings, and redacted evidence.
-
-Optional settings can be passed as CLI arguments or environment variables:
-
-```text
---max-report-age-days / CHECKMATE_MAX_REPORT_AGE_DAYS
---max-report-bytes    / CHECKMATE_MAX_REPORT_BYTES
---reports-dir         / CHECKMATE_REPORTS_DIR
-```
+The newest valid JSON report is selected when `reportId` is omitted, and the chat session pins every lookup to its scanned report. Tool responses include report and finding IDs, freshness, findings-only coverage warnings, and redacted evidence. The tools hold no Auth0 or OpenAI credentials, accept report IDs rather than arbitrary paths, and reject oversized reports.
 
 ## Verification
 
@@ -277,7 +235,7 @@ npm test
 npm run format:check
 ```
 
-Tests mock child-process execution, Auth0 reads, MCP transports, and the chatbot model. They require no Auth0 or OpenAI credentials.
+Tests mock child-process execution, Auth0 reads, and the chatbot model. They require no Auth0 or OpenAI credentials.
 
 Generated Terraform is also checked against the provider schema during submission. The first validation may download the pinned Auth0 provider into the generated change-package directory.
 
@@ -294,11 +252,11 @@ A real report from the target tenant is still needed to confirm any tenant/versi
 - Scan, review, package generation, Terraform validation, and API preflight perform no Auth0 write operations. Only the explicitly confirmed dev API execution step can write.
 - Production execution is blocked.
 - The remediation UI does not call OpenAI. Recommendations and deployment artifacts come from versioned, testable mappings over supported CheckMate validators and narrow live Auth0 reads.
-- OpenAI is called only by the explicit chatbot workflow. The chatbot model can invoke only bounded read-only MCP allowlists; it cannot invoke CheckMate execution or Auth0 write APIs. Confirmed dev execution remains deterministic application code based on an expiring, digest-bound plan.
+- OpenAI is called only by the explicit chatbot workflow. The chatbot model can invoke only bounded read-only tool allowlists; it cannot invoke CheckMate execution or Auth0 write APIs. Confirmed dev execution remains deterministic application code based on an expiring, digest-bound plan.
 - The raw CheckMate report, environment, API key, Auth0 credentials, and Management API tokens are never sent to OpenAI.
 - Only selected normalised fields are sent. Sensitive keys, known credential values, bearer values, and JWT-shaped strings are redacted.
-- OpenAI responses use a strict schema, short bullet arrays, and low verbosity. The chatbot exposes only its documented read-only MCP tools.
-- The CheckMate MCP server is read-only, has no Auth0 or OpenAI credentials, accepts report IDs rather than arbitrary paths, rejects oversized reports, and redacts sensitive evidence before returning it.
+- OpenAI responses use a strict schema, short bullet arrays, and low verbosity. The chatbot exposes only its documented read-only tools.
+- The in-process CheckMate report tools are read-only, hold no Auth0 or OpenAI credentials, accept report IDs rather than arbitrary paths, reject oversized reports, and redact sensitive evidence before returning it.
 - Application and connection checkboxes come from narrow, finding-triggered, read-only Auth0 lookups. There is no generic Management API request function.
 - Each stored decision references its CheckMate finding ID and preserves the available CheckMate wording.
 - No generic shell command or generic Auth0 Management API function exists.
@@ -317,7 +275,7 @@ CheckMate itself reads tenant configuration through the Auth0 Management API and
 2. **Milestone 2 — complete:** deterministic remediation guidance and local administrator decision records.
 3. **Milestone 3 — complete:** generate environment-specific YAML, Bash, and executable Terraform packages from accepted action-level decisions.
 4. **Milestone 4 — complete for supported actions:** validate Terraform and API plans for both environments; require explicit development confirmation, drift checks, execution verification, resume, and rollback.
-5. **Milestone 5 — first read-only slice complete:** expose report summaries, finding search, application posture, security-topic context, and grounded prompt templates through a standalone stdio MCP server.
+5. **Milestone 5 — complete:** expose report summaries, finding search, application posture, and security-topic context through the shared read-only report query library used in-process by the chatbot.
 6. **Milestone 6 — planned:** rerun the same CheckMate validators and record post-change verification evidence.
 
-Production changes remain outside the current POC. Future MCP capabilities will remain narrow and will keep tenant writes behind the existing reviewed change-package workflow.
+Production changes remain outside the current POC. The Auth0 MCP connection stays read-only, and tenant writes remain behind the existing reviewed change-package workflow.

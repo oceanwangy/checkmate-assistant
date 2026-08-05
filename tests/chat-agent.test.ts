@@ -5,7 +5,7 @@ import {
   type ModelRequest,
 } from "../apps/checkmate-chat/src/chat-agent.js";
 import type { ChatConfig } from "../apps/checkmate-chat/src/config.js";
-import type { McpHubLike } from "../apps/checkmate-chat/src/mcp-hub.js";
+import type { ToolHubLike } from "../apps/checkmate-chat/src/tool-hub.js";
 import { sanitizeToolResult } from "../apps/checkmate-chat/src/sanitize.js";
 import type {
   McpCallResult,
@@ -16,7 +16,6 @@ const config: ChatConfig = {
   projectRoot: "/project",
   publicDirectory: "/project/public",
   reportsDirectory: "/project/reports",
-  checkmateServerPath: "/project/checkmate.js",
   host: "127.0.0.1",
   port: 4320,
   model: "gpt-5.4-mini",
@@ -52,7 +51,7 @@ const toolDefinitions: McpToolDefinition[] = [
   },
 ];
 
-class FakeHub implements McpHubLike {
+class FakeHub implements ToolHubLike {
   readonly callTool = vi.fn((name: string): Promise<McpCallResult> => {
     if (name === "checkmate_get_report_summary") {
       return Promise.resolve({
