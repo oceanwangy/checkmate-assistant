@@ -1,6 +1,6 @@
 import type { CheckmatePriority } from "../findings/types.js";
 
-export const POSTURE_MODEL_VERSION = "checkmate-1.8.3";
+export const POSTURE_MODEL_VERSION = "checkmate-1.8.4";
 
 export type ScoredCheckmatePriority = "red" | "yellow" | "green";
 
@@ -27,7 +27,7 @@ const control = (
 
 /**
  * The complete set of red, yellow, and green validators registered by
- * @auth0/auth0-checkmate 1.8.3. Blue informational and violet GenAI
+ * @auth0/auth0-checkmate 1.8.4. Blue informational and violet GenAI
  * validators remain visible in the report but do not contribute points.
  */
 export const POSTURE_CONTROLS: readonly PostureControl[] = [

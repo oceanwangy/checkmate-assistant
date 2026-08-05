@@ -204,7 +204,7 @@ describe("chat dev confirmation workflow", () => {
           reportId: "latest-report.json",
           startedAt: "2026-07-14T13:59:00.000Z",
           finishedAt: "2026-07-14T14:00:00.000Z",
-          checkmateVersion: "1.8.3",
+          checkmateVersion: "1.8.4",
         }),
       ),
     };

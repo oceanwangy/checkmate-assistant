@@ -36,7 +36,7 @@ function entry(
 describe("deterministic remediation guidance", () => {
   it("uses a versioned guidance engine", () => {
     expect(DETERMINISTIC_GUIDANCE_ENGINE).toBe(
-      "checkmate-1.8.3-deterministic-guidance-v1",
+      "checkmate-1.8.4-deterministic-guidance-v1",
     );
   });
 

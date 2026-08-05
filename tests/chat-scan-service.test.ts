@@ -29,7 +29,7 @@ describe("chat CheckMate scan service", () => {
       targetDomain: "dev-tenant.auth0.com",
       startedAt: "2026-08-05T09:00:00.000Z",
       finishedAt: "2026-08-05T09:01:00.000Z",
-      checkmateVersion: "1.8.3",
+      checkmateVersion: "1.8.4",
       reportPath,
       exitCode: 0,
     });
@@ -52,7 +52,7 @@ describe("chat CheckMate scan service", () => {
       profile: "dev",
       tenantDomain: "dev-tenant.auth0.com",
       reportId: "dev-report.json",
-      checkmateVersion: "1.8.3",
+      checkmateVersion: "1.8.4",
     });
     expect(scanExecutor).toHaveBeenCalledOnce();
     expect(scanExecutor.mock.calls[0]?.[0]).toEqual({ profile: "dev" });

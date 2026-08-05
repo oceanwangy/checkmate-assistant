@@ -46,7 +46,7 @@ Every normalised finding retains its original `raw` object. Unknown fields are n
 - Node.js 20.18.3 or newer (Node.js 22 LTS is recommended for this POC)
 - npm
 - Terraform CLI 1.5 or newer
-- Auth0 CheckMate 1.8.3, installed automatically as a runtime dependency
+- Auth0 CheckMate 1.8.4, installed automatically as a runtime dependency
 - A dedicated Auth0 Machine-to-Machine application with CheckMate's documented read scopes
 - For dev execution only: `update:connections`, `update:connections_options`, and/or `update:attack_protection`, depending on the accepted changes
 - An OpenAI API key and separately configured API billing only for the optional chatbot
@@ -241,7 +241,7 @@ Generated Terraform is also checked against the provider schema during submissio
 
 ## Report caveats
 
-CheckMate 1.8.3 writes a JSON summary containing validator detail outcomes. A validator's parent colour is its priority: red is high, yellow is moderate, green is low, blue is informational, and violet is a GenAI insight. The posture model compares the report with the version-locked 1.8.3 catalog: its 36 red/yellow/green validators provide 118 available points, and scorable validators absent from a complete findings-only report are counted as passed.
+CheckMate 1.8.4 writes a JSON summary containing validator detail outcomes. A validator's parent colour is its priority: red is high, yellow is moderate, green is low, blue is informational, and violet is a GenAI insight. The posture model compares the report with the version-locked 1.8.4 catalog: its 36 red/yellow/green validators provide 118 available points, and scorable validators absent from a complete findings-only report are counted as passed.
 
 The current CheckMate JSON also omits tenant and generation metadata. During `scan`, the selected domain is supplied as summary context. For imported reports, the domain remains “not included in report” unless a supported envelope provides it. A file's modification time is used as the best available report timestamp and should not be mistaken for a scanner-authored timestamp.
 

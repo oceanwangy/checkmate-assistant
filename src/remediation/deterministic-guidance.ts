@@ -7,7 +7,7 @@ import type {
 } from "./actionable-change.js";
 
 export const DETERMINISTIC_GUIDANCE_ENGINE =
-  "checkmate-1.8.3-deterministic-guidance-v1";
+  "checkmate-1.8.4-deterministic-guidance-v1";
 
 const conciseBulletSchema = z.string().trim().min(1).max(220);
 

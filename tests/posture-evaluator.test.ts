@@ -26,13 +26,13 @@ function finding(
 }
 
 describe("tenant configuration posture", () => {
-  it("uses all 36 scorable CheckMate 1.8.3 validators", () => {
+  it("uses all 36 scorable CheckMate 1.8.4 validators", () => {
     const assessment = evaluatePosture([]);
 
     expect(POSTURE_CONTROLS).toHaveLength(36);
     expect(POSTURE_MAXIMUM_SCORE).toBe(118);
     expect(assessment).toMatchObject({
-      modelVersion: "checkmate-1.8.3",
+      modelVersion: "checkmate-1.8.4",
       maximumScore: 118,
       catalogControlCount: 36,
       passedControlCount: 36,

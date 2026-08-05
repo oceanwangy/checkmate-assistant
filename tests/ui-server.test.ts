@@ -345,7 +345,7 @@ describe("local review UI", () => {
       });
       expect(stored.review.completedAt).toBeUndefined();
       expect(stored.review.guidanceEngine).toBe(
-        "checkmate-1.8.3-deterministic-guidance-v1",
+        "checkmate-1.8.4-deterministic-guidance-v1",
       );
 
       const earlySubmitResponse = await fetch(`${running.url}/api/submit`, {
