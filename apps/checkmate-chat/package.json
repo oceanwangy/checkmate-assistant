@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prestart": "npm --prefix ../.. run build:core && npm --prefix ../.. run build:app && npm run build",
     "start": "node dist/cli.js"
   },
   "dependencies": {

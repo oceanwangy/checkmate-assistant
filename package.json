@@ -22,7 +22,6 @@
     "predev": "npm run build:core",
     "dev": "tsx src/cli.ts",
     "lint": "eslint .",
-    "prechat": "npm run build:core && npm run build:app && npm run build:chat",
     "chat": "npm run start --workspace @checkmate-assistant/chat --",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
