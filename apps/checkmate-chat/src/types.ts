@@ -1,5 +1,4 @@
-export type EvidenceBasis =
-  "checkmate_report" | "auth0_live" | "general_guidance";
+export type EvidenceBasis = "checkmate_report" | "auth0_live";
 
 export interface ChatHistoryMessage {
   role: "user" | "assistant";
@@ -9,6 +8,7 @@ export interface ChatHistoryMessage {
 export interface ChatAnswerItem {
   text: string;
   basis: EvidenceBasis;
+  findingIds: string[];
 }
 
 export interface ChatAnswerSection {
@@ -21,11 +21,17 @@ export interface ChatActionConfirmation {
   findingIds: string[];
 }
 
+export interface ChatSuggestedQuestion {
+  question: string;
+  findingIds: string[];
+}
+
 export interface ChatAnswer {
   headline: string;
+  headlineFindingIds: string[];
   sections: ChatAnswerSection[];
   evidenceGaps: string[];
-  suggestedQuestions: string[];
+  suggestedQuestions: ChatSuggestedQuestion[];
   actionConfirmations: ChatActionConfirmation[];
 }
 
@@ -86,6 +92,7 @@ export interface McpServerStatus {
 }
 
 export interface ChatStatus {
+  aiProvider: "openai" | "anthropic" | "google";
   model: string;
   remediationUrl: string;
   checkmate: McpServerStatus;

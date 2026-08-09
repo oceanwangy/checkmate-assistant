@@ -303,7 +303,7 @@ export class CheckmateReportTools {
           additionalEvidenceNeeded: definition.additionalEvidenceNeeded,
           responseGuidance: [
             "Lead with failed and warning findings that directly support actionable suggestions.",
-            "Separate report-grounded facts from general security guidance.",
+            "Do not recommend a control unless a returned CheckMate finding directly supports it.",
             "Do not claim the report proves an attack occurred or identifies its source.",
             "Ask for live logs or configuration when required evidence is missing.",
           ],

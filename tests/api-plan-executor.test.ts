@@ -724,7 +724,6 @@ describe("Auth0 API plan executor", () => {
       jwt_configuration: {
         alg: "RS256",
         lifetime_in_seconds: 36000,
-        secret_encoded: false,
       },
       cross_origin_authentication: false,
       grant_types: ["authorization_code", "refresh_token"],

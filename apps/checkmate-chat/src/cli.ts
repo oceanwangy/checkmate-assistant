@@ -88,6 +88,7 @@ async function main(): Promise<void> {
   process.stdout.write(
     [
       `CheckMate chatbot: http://${config.host}:${config.port}`,
+      `AI provider: ${config.aiProvider} (${config.model}); BYO credentials configured server-side`,
       `CheckMate reports: read in-process from ${config.reportsDirectory}`,
       `Auth0 MCP: ${status.auth0.connected ? "connected (read-only)" : status.auth0.enabled ? "unavailable; report-only answers remain available" : "disabled"}`,
       `Dev remediation: ${config.devRemediationEnabled ? `planning and execution enabled for ${config.devTenantDomain ?? "configured tenant"} with confirmation` : config.devPlanningEnabled ? `API planning enabled; execution disabled; ${config.devRemediationDisabledReason ?? "configure the dev write boundary"}` : `planning and execution disabled; ${config.devRemediationDisabledReason ?? "configure the dev tenant"}`}`,

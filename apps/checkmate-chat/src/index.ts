@@ -1,5 +1,17 @@
-export { CheckmateChatAgent, OpenAiChatModel } from "./chat-agent.js";
+export { CheckmateChatAgent } from "./chat-agent.js";
 export type { ChatModel, ModelRequest, ModelTurn } from "./chat-agent.js";
+export { AnthropicChatModel } from "./model/anthropic.js";
+export { GoogleChatModel } from "./model/google.js";
+export { OpenAiChatModel } from "./model/openai.js";
+export { createChatModel } from "./model/factory.js";
+export type {
+  AiProvider,
+  AiReasoningEffort,
+  ModelMessage,
+  ModelTool,
+  ModelToolCall,
+  ModelToolResult,
+} from "./model/contracts.js";
 export { loadChatConfig } from "./config.js";
 export type { ChatConfig } from "./config.js";
 export { CheckmateScanCoordinator } from "./checkmate-scan.js";

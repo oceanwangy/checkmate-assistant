@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { AiProvider, AiReasoningEffort } from "./model/contracts.js";
 
 const hostSchema = z.enum(["127.0.0.1", "localhost"]);
 const portSchema = z.coerce.number().int().min(1).max(65_535);
@@ -8,6 +9,29 @@ const booleanSchema = z
   .enum(["true", "false"])
   .transform((value) => value === "true");
 const reasoningSchema = z.enum(["low", "medium", "high"]);
+const providerSchema = z.enum(["openai", "anthropic", "google"]);
+const timeoutSchema = z.coerce.number().int().min(1_000).max(600_000);
+
+const PROVIDER_CONFIGURATION: Record<
+  AiProvider,
+  { key: string; model: string; defaultModel: string }
+> = {
+  openai: {
+    key: "OPENAI_API_KEY",
+    model: "OPENAI_MODEL",
+    defaultModel: "gpt-5.5",
+  },
+  anthropic: {
+    key: "ANTHROPIC_API_KEY",
+    model: "ANTHROPIC_MODEL",
+    defaultModel: "claude-sonnet-4-6",
+  },
+  google: {
+    key: "GEMINI_API_KEY",
+    model: "GEMINI_MODEL",
+    defaultModel: "gemini-3.6-flash",
+  },
+};
 
 export const AUTH0_READ_ONLY_TOOLS = [
   "auth0_list_logs",
@@ -22,9 +46,11 @@ export interface ChatConfig {
   reportsDirectory: string;
   host: "127.0.0.1" | "localhost";
   port: number;
+  aiProvider: AiProvider;
   model: string;
-  reasoningEffort: "low" | "medium" | "high";
-  openAiApiKey: string;
+  reasoningEffort: AiReasoningEffort;
+  aiApiKey: string;
+  aiTimeoutMs: number;
   remediationUrl: string;
   auth0Enabled: boolean;
   auth0Command: string;
@@ -54,9 +80,15 @@ export function loadChatConfig(
   const projectRoot = path.resolve(
     env.CHECKMATE_CHAT_PROJECT_ROOT ?? defaultProjectRoot(),
   );
-  const apiKey = env.OPENAI_API_KEY?.trim();
+  const aiProvider = providerSchema.parse(
+    env.AI_PROVIDER?.trim().toLowerCase() ?? "openai",
+  );
+  const providerConfiguration = PROVIDER_CONFIGURATION[aiProvider];
+  const apiKey = env[providerConfiguration.key]?.trim();
   if (!apiKey) {
-    throw new Error("OPENAI_API_KEY is required to start the chatbot.");
+    throw new Error(
+      `${providerConfiguration.key} is required when AI_PROVIDER=${aiProvider}.`,
+    );
   }
 
   const host = hostSchema.parse(env.CHECKMATE_CHAT_HOST ?? "127.0.0.1");
@@ -65,12 +97,13 @@ export function loadChatConfig(
     env.CHECKMATE_CHAT_AUTH0_ENABLED ?? "true",
   );
   const model = (
-    env.OPENAI_MODEL ??
-    env.CHECKMATE_CHAT_MODEL ??
-    "gpt-5.5"
+    env.AI_MODEL ??
+    env[providerConfiguration.model] ??
+    (aiProvider === "openai" ? env.CHECKMATE_CHAT_MODEL : undefined) ??
+    providerConfiguration.defaultModel
   ).trim();
   if (!/^[a-zA-Z0-9._:-]+$/.test(model)) {
-    throw new Error("OPENAI_MODEL contains unsupported characters.");
+    throw new Error("The configured AI model contains unsupported characters.");
   }
 
   const auth0Tools = AUTH0_READ_ONLY_TOOLS.join(",");
@@ -126,13 +159,20 @@ export function loadChatConfig(
     ),
     host,
     port,
+    aiProvider,
     model,
     reasoningEffort: reasoningSchema.parse(
-      env.OPENAI_REASONING_EFFORT ??
+      env.AI_REASONING_EFFORT ??
+        (aiProvider === "openai" ? env.OPENAI_REASONING_EFFORT : undefined) ??
         env.CHECKMATE_CHAT_REASONING_EFFORT ??
         "high",
     ),
-    openAiApiKey: apiKey,
+    aiApiKey: apiKey,
+    aiTimeoutMs: timeoutSchema.parse(
+      env.AI_TIMEOUT_MS ??
+        (aiProvider === "openai" ? env.OPENAI_TIMEOUT_MS : undefined) ??
+        "180000",
+    ),
     remediationUrl:
       env.CHECKMATE_CHAT_REMEDIATION_URL ?? "http://127.0.0.1:4317",
     auth0Enabled,

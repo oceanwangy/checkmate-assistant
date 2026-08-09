@@ -76,6 +76,18 @@ function renderOfficialAuth0McpStatus(auth0) {
   statusNode.removeAttribute("title");
 }
 
+function renderAiProviderStatus(provider, model) {
+  const labels = {
+    openai: "OpenAI",
+    anthropic: "Anthropic Claude",
+    google: "Google Gemini",
+  };
+  const node = document.querySelector("#ai-provider-status");
+  node.textContent = `AI: ${labels[provider] ?? provider} · ${model} · BYO credentials`;
+  node.title =
+    "The application operator supplies these credentials. They stay on the server and are never sent to the browser. Remediation does not use AI.";
+}
+
 function renderSelectedReport(report, environment) {
   state.activeProfile = environment?.profile ?? null;
   state.activeReportId = report?.reportId ?? null;
@@ -122,6 +134,7 @@ async function loadStatus() {
     const status = await response.json();
     state.csrfToken = status.csrfToken;
     renderOfficialAuth0McpStatus(status.auth0);
+    renderAiProviderStatus(status.aiProvider, status.model);
     state.scanTargets = status.scanTargets;
     configureScanButton("dev", status.scanTargets.dev);
     configureScanButton("prod", status.scanTargets.prod);
@@ -133,6 +146,8 @@ async function loadStatus() {
     document.querySelector("#report-detail").textContent = error.message;
     state.scanTargets = null;
     renderOfficialAuth0McpStatus({ connected: false });
+    document.querySelector("#ai-provider-status").textContent =
+      "AI provider unavailable";
     syncControls();
   }
 }

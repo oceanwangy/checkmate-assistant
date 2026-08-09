@@ -1,4 +1,8 @@
-import type { FindingStatus, NormalizedCheckmateFinding } from "./types.js";
+import type {
+  CheckmatePriority,
+  FindingStatus,
+  NormalizedCheckmateFinding,
+} from "./types.js";
 import { redactSensitive } from "./redaction.js";
 import { isAutoRemediableFinding } from "./remediation-support.js";
 
@@ -8,6 +12,7 @@ export interface FindingView {
   title: string;
   status: FindingStatus;
   autoRemediable: boolean;
+  priority?: CheckmatePriority;
   severity?: string;
   description?: string;
   recommendation?: string;
@@ -208,6 +213,7 @@ export function toFindingView(
     autoRemediable: isAutoRemediableFinding(finding),
   };
   if (finding.validatorId) view.validatorId = finding.validatorId;
+  if (finding.priority) view.priority = finding.priority;
   if (finding.severity) view.severity = finding.severity;
   if (finding.description) view.description = finding.description;
   if (finding.recommendation) view.recommendation = finding.recommendation;

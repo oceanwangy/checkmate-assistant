@@ -1203,9 +1203,17 @@ summary:focus-visible {
 .composer-meta {
   padding: 7px 4px 0;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   color: var(--muted);
   font-size: 10px;
+  gap: 16px;
+  align-items: center;
+}
+
+#ai-provider-status {
+  margin-left: auto;
+  text-align: right;
 }
 
 .composer-meta button {

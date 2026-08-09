@@ -18,9 +18,11 @@ const config: ChatConfig = {
   reportsDirectory: "/project/reports",
   host: "127.0.0.1",
   port: 4320,
+  aiProvider: "openai",
   model: "gpt-5.4-mini",
   reasoningEffort: "low",
-  openAiApiKey: "test-key",
+  aiApiKey: "test-key",
+  aiTimeoutMs: 180_000,
   remediationUrl: "http://127.0.0.1:4317",
   auth0Enabled: false,
   auth0Command: process.execPath,
@@ -52,6 +54,8 @@ const toolDefinitions: McpToolDefinition[] = [
 ];
 
 class FakeHub implements ToolHubLike {
+  constructor(private readonly findingPriority = "red") {}
+
   readonly callTool = vi.fn((name: string): Promise<McpCallResult> => {
     if (name === "checkmate_get_report_summary") {
       return Promise.resolve({
@@ -80,6 +84,8 @@ class FakeHub implements ToolHubLike {
             findingId: "check-breached-password-detection",
             title: "Breached Password Detection",
             status: "failed",
+            priority: this.findingPriority,
+            autoRemediable: true,
           },
         ],
       },
@@ -114,25 +120,22 @@ describe("CheckMate chatbot agent", () => {
         requests.push(request);
         if (requests.length === 1) {
           return Promise.resolve({
-            output: [
-              Object.assign(
-                {
-                  type: "function_call" as const,
-                  name: "checkmate_get_security_topic_context",
-                  arguments: JSON.stringify({ topic: "credential_stuffing" }),
-                  call_id: "call-1",
-                },
-                { parsed_arguments: { topic: "credential_stuffing" } },
-              ),
+            toolCalls: [
+              {
+                id: "call-1",
+                name: "checkmate_get_security_topic_context",
+                arguments: { topic: "credential_stuffing" },
+              },
             ],
             outputParsed: null,
             outputText: "",
           });
         }
         return Promise.resolve({
-          output: [],
+          toolCalls: [],
           outputParsed: {
             headline: "Strengthen credential-stuffing controls first.",
+            headlineFindingIds: ["check-breached-password-detection"],
             sections: [
               {
                 title: "Recommended first step",
@@ -140,12 +143,18 @@ describe("CheckMate chatbot agent", () => {
                   {
                     text: "Enable breached-password detection. Finding: check-breached-password-detection.",
                     basis: "checkmate_report",
+                    findingIds: ["check-breached-password-detection"],
                   },
                 ],
               },
             ],
             evidenceGaps: ["Confirm the current live protection settings."],
-            suggestedQuestions: ["Which applications were affected?"],
+            suggestedQuestions: [
+              {
+                question: "Would you like more detail about this control?",
+                findingIds: ["check-breached-password-detection"],
+              },
+            ],
             actionConfirmations: [
               {
                 question:
@@ -184,14 +193,11 @@ describe("CheckMate chatbot agent", () => {
         reportId: "latest-report.json",
       },
     );
-    expect(requests[1]?.input).toContainEqual(
+    expect(requests[1]?.toolResults).toContainEqual(
       expect.objectContaining({
-        type: "function_call_output",
-        call_id: "call-1",
+        callId: "call-1",
+        name: "checkmate_get_security_topic_context",
       }),
-    );
-    expect(JSON.stringify(requests[1]?.input)).not.toContain(
-      "parsed_arguments",
     );
     expect(requests[1]?.tools.map((tool) => tool.name)).not.toContain(
       "checkmate_get_security_topic_context",
@@ -217,9 +223,10 @@ describe("CheckMate chatbot agent", () => {
   it("removes change confirmations from production conversations", async () => {
     const model: ChatModel = {
       create: vi.fn().mockResolvedValue({
-        output: [],
+        toolCalls: [],
         outputParsed: {
           headline: "Review the production finding.",
+          headlineFindingIds: ["check-breached-password-detection"],
           sections: [
             {
               title: "Recommendation",
@@ -227,6 +234,7 @@ describe("CheckMate chatbot agent", () => {
                 {
                   text: "Plan the change through production governance.",
                   basis: "checkmate_report",
+                  findingIds: ["check-breached-password-detection"],
                 },
               ],
             },
@@ -252,6 +260,137 @@ describe("CheckMate chatbot agent", () => {
     });
 
     expect(result.answer.actionConfirmations).toEqual([]);
+  });
+
+  it("does not display a recommendation invented outside the selected report", async () => {
+    let turn = 0;
+    const model: ChatModel = {
+      create: vi.fn(() => {
+        turn += 1;
+        if (turn === 1) {
+          return Promise.resolve({
+            toolCalls: [
+              {
+                id: "call-ungrounded",
+                name: "checkmate_get_security_topic_context",
+                arguments: { topic: "credential_stuffing" },
+              },
+            ],
+            outputParsed: null,
+            outputText: "",
+          });
+        }
+        return Promise.resolve({
+          toolCalls: [],
+          outputParsed: {
+            headline: "Deploy an unrelated network appliance.",
+            headlineFindingIds: ["invented-finding"],
+            sections: [
+              {
+                title: "Invented recommendation",
+                items: [
+                  {
+                    text: "Buy and deploy a control that CheckMate did not report.",
+                    basis: "checkmate_report",
+                    findingIds: ["invented-finding"],
+                  },
+                ],
+              },
+            ],
+            evidenceGaps: [],
+            suggestedQuestions: [
+              {
+                question: "Would you like another unrelated suggestion?",
+                findingIds: ["invented-finding"],
+              },
+            ],
+            actionConfirmations: [
+              {
+                question: "Would you like me to prepare it?",
+                findingIds: ["invented-finding"],
+              },
+            ],
+          },
+          outputText: "",
+        });
+      }),
+    };
+    const agent = new CheckmateChatAgent(new FakeHub(), config, model);
+
+    const result = await agent.answer("What else should I deploy?", [], {
+      profile: "dev",
+      reportId: "latest-report.json",
+      tenantDomain: "example.auth0.com",
+    });
+
+    expect(result.answer.headline).toBe(
+      "No matching CheckMate recommendation was found.",
+    );
+    expect(result.answer.sections[0]?.items[0]?.text).toContain(
+      "does not contain an open red, yellow, or green finding",
+    );
+    expect(JSON.stringify(result.answer)).not.toContain("network appliance");
+    expect(result.answer.suggestedQuestions).toEqual([]);
+    expect(result.answer.actionConfirmations).toEqual([]);
+  });
+
+  it("does not recommend informational findings that cannot improve the posture score", async () => {
+    let turn = 0;
+    const model: ChatModel = {
+      create: vi.fn(() => {
+        turn += 1;
+        if (turn === 1) {
+          return Promise.resolve({
+            toolCalls: [
+              {
+                id: "call-informational",
+                name: "checkmate_get_security_topic_context",
+                arguments: { topic: "credential_stuffing" },
+              },
+            ],
+            outputParsed: null,
+            outputText: "",
+          });
+        }
+        return Promise.resolve({
+          toolCalls: [],
+          outputParsed: {
+            headline: "Treat the informational result as a recommendation.",
+            headlineFindingIds: ["check-breached-password-detection"],
+            sections: [
+              {
+                title: "Informational result",
+                items: [
+                  {
+                    text: "Change this informational item.",
+                    basis: "checkmate_report",
+                    findingIds: ["check-breached-password-detection"],
+                  },
+                ],
+              },
+            ],
+            evidenceGaps: [],
+            suggestedQuestions: [],
+            actionConfirmations: [],
+          },
+          outputText: "",
+        });
+      }),
+    };
+    const agent = new CheckmateChatAgent(new FakeHub("blue"), config, model);
+
+    const result = await agent.answer("What should I improve?", [], {
+      profile: "dev",
+      reportId: "latest-report.json",
+      tenantDomain: "example.auth0.com",
+    });
+
+    expect(result.answer.headline).toBe(
+      "No matching CheckMate recommendation was found.",
+    );
+    expect(JSON.stringify(result.answer)).not.toContain(
+      "Change this informational item",
+    );
   });
 
   it("redacts secrets while preserving security configuration names", () => {

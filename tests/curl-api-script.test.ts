@@ -187,6 +187,111 @@ fi
     expect(curlArguments).not.toContain("test-token");
   });
 
+  it("removes read-only client JWT fields from the generated PATCH", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-curl-"));
+    const patchBodyFile = path.join(directory, "patch-body.json");
+    const fakeCurl = path.join(directory, "curl");
+    const scriptFile = path.join(directory, "change.sh");
+    const before = {
+      client_id: "client_12345678",
+      name: "Default App",
+      jwt_configuration: {
+        alg: "HS256",
+        lifetime_in_seconds: 36000,
+        scopes: {},
+        secret_encoded: true,
+      },
+    };
+    const expectedBody = {
+      jwt_configuration: {
+        alg: "RS256",
+        lifetime_in_seconds: 36000,
+        scopes: {},
+      },
+    };
+    const after = {
+      ...before,
+      jwt_configuration: {
+        ...before.jwt_configuration,
+        alg: "RS256",
+      },
+    };
+    await writeFile(
+      fakeCurl,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"/oauth/token"* ]]; then
+  printf '%s' '{"access_token":"test-token","scope":"read:clients update:clients"}'
+elif [[ "$*" == *"--request PATCH"* ]]; then
+  cat > "\${PATCH_BODY_FILE}"
+  output_file=""
+  headers_file=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --output)
+        shift
+        output_file="$1"
+        ;;
+      --dump-header)
+        shift
+        headers_file="$1"
+        ;;
+    esac
+    shift
+  done
+  [[ -z "\${output_file}" ]] || printf '%s' '{}' > "\${output_file}"
+  [[ -z "\${headers_file}" ]] || printf 'HTTP/2 200\\r\\n\\r\\n' > "\${headers_file}"
+  printf '200'
+else
+  if [[ -s "\${PATCH_BODY_FILE}" ]]; then
+    printf '%s' '${JSON.stringify(after)}'
+  else
+    printf '%s' '${JSON.stringify(before)}'
+  fi
+fi
+`,
+    );
+    await chmod(fakeCurl, 0o700);
+
+    const call: ApiPlanCall = {
+      id: "api-call-client-jwt",
+      method: "PATCH",
+      endpoint: "/api/v2/clients/client_12345678",
+      resourceType: "client",
+      resourceId: "client_12345678",
+      resourceName: "Default App",
+      bodyStrategy: "merge_live_nested_objects",
+      actionIds: ["action-rs256"],
+      preconditions: [
+        { path: "jwt_configuration.alg", expectedValue: "HS256" },
+      ],
+      body: { jwt_configuration: { alg: "RS256" } },
+    };
+    const generated = buildCurlApiScript(
+      "dev",
+      call,
+      apiRequestSha256(call.method, call.endpoint, expectedBody),
+      "tenant.auth0.com",
+    );
+    await writeFile(scriptFile, generated.script, { mode: 0o700 });
+    const result = spawnSync("bash", [scriptFile], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ""}`,
+        PATCH_BODY_FILE: patchBodyFile,
+        AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+        AUTH0CHECKMATE_DEV_CLIENT_ID: "client-from-env",
+        AUTH0CHECKMATE_DEV_CLIENT_SECRET: "secret-from-env",
+      },
+    });
+
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(JSON.parse(await readFile(patchBodyFile, "utf8"))).toEqual(
+      expectedBody,
+    );
+  });
+
   it("re-reads and safely retries a PATCH after Auth0 returns 429", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-curl-"));
     const patchBodyFile = path.join(directory, "patch-body.json");

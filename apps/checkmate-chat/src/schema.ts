@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const chatAnswerSchema = z.object({
   headline: z.string().min(1).max(240),
+  headlineFindingIds: z.array(z.string().min(1).max(200)).max(4),
   sections: z
     .array(
       z.object({
@@ -10,11 +11,8 @@ export const chatAnswerSchema = z.object({
           .array(
             z.object({
               text: z.string().min(1).max(800),
-              basis: z.enum([
-                "checkmate_report",
-                "auth0_live",
-                "general_guidance",
-              ]),
+              basis: z.enum(["checkmate_report", "auth0_live"]),
+              findingIds: z.array(z.string().min(1).max(200)).max(4),
             }),
           )
           .min(1)
@@ -24,7 +22,14 @@ export const chatAnswerSchema = z.object({
     .min(1)
     .max(6),
   evidenceGaps: z.array(z.string().min(1).max(400)).max(6),
-  suggestedQuestions: z.array(z.string().min(1).max(180)).max(4),
+  suggestedQuestions: z
+    .array(
+      z.object({
+        question: z.string().min(1).max(180),
+        findingIds: z.array(z.string().min(1).max(200)).max(4),
+      }),
+    )
+    .max(4),
   actionConfirmations: z
     .array(
       z.object({

@@ -77,9 +77,11 @@ describe("chat dev confirmation workflow", () => {
       reportsDirectory: "/project/reports",
       host: "127.0.0.1",
       port: 4320,
+      aiProvider: "openai",
       model: "gpt-5.5",
       reasoningEffort: "high",
-      openAiApiKey: "test-key",
+      aiApiKey: "test-key",
+      aiTimeoutMs: 180_000,
       remediationUrl: "http://127.0.0.1:4317",
       auth0Enabled: false,
       auth0Command: process.execPath,
@@ -117,6 +119,7 @@ describe("chat dev confirmation workflow", () => {
     const answerPayload = () => ({
       answer: {
         headline: "Remove the implicit grant from GrantMate.",
+        headlineFindingIds: ["finding-1"],
         sections: [
           {
             title: "Recommended change",
@@ -124,6 +127,7 @@ describe("chat dev confirmation workflow", () => {
               {
                 text: "Remove implicit.",
                 basis: "checkmate_report",
+                findingIds: ["finding-1"],
               },
             ],
           },

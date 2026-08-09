@@ -82,6 +82,18 @@ function merge(current, planned) {
   return structuredClone(planned);
 }
 
+function mergeLiveNestedObject(resourceType, key, current, planned) {
+  const merged = merge(current, planned);
+  if (resourceType !== "client" || key !== "jwt_configuration") return merged;
+  const writable = new Set(["alg", "lifetime_in_seconds", "scopes"]);
+  for (const plannedKey of Object.keys(planned)) {
+    if (!writable.has(plannedKey)) {
+      throw new Error("Execution stopped: API plan contains a non-writable client JWT setting.");
+    }
+  }
+  return Object.fromEntries(Object.entries(merged).filter(([mergedKey]) => writable.has(mergedKey)));
+}
+
 function stripNulls(value) {
   if (Array.isArray(value)) return value.map(stripNulls);
   if (value !== null && typeof value === "object") {
@@ -120,7 +132,8 @@ try {
 
   let body;
   if (process.env.CHECKMATE_BODY_STRATEGY === "merge_live_nested_objects") {
-    body = Object.fromEntries(Object.entries(planned).map(([key, value]) => [key, merge(live[key], value)]));
+    body = Object.fromEntries(Object.entries(planned).map(([key, value]) =>
+      [key, mergeLiveNestedObject(process.env.CHECKMATE_RESOURCE_TYPE, key, live[key], value)]));
   } else if (process.env.CHECKMATE_BODY_STRATEGY === "merge_live_connection_options") {
     body = { options: merge(stripNulls(live.options ?? {}), planned.options) };
   } else {
@@ -269,6 +282,7 @@ export SCOPES=${bashQuote(scopes(call))}
 export CHECKMATE_ENDPOINT=${bashQuote(call.endpoint)}
 export CHECKMATE_READ_ENDPOINT=${bashQuote(readEndpoint(call))}
 export CHECKMATE_RESOURCE_NAME=${bashQuote(call.resourceName)}
+export CHECKMATE_RESOURCE_TYPE=${bashQuote(call.resourceType)}
 export CHECKMATE_BODY_STRATEGY=${bashQuote(call.bodyStrategy)}
 export CHECKMATE_EXPECTED_REQUEST_SHA256=${bashQuote(requestSha256)}
 export CHECKMATE_PLANNED_B64=${bashQuote(base64Json(call.body))}

@@ -226,6 +226,7 @@ export function createChatServer(options: ChatServerOptions): Server {
     const session = sessionFor(request, response);
     const serverStatus = hub.getStatus();
     const status: ChatStatus = {
+      aiProvider: config.aiProvider,
       model: config.model,
       remediationUrl: config.remediationUrl,
       checkmate: serverStatus.checkmate,
@@ -390,9 +391,17 @@ export function createChatServer(options: ChatServerOptions): Server {
       }
       const publicAnswer = {
         headline: result.answer.headline,
-        sections: result.answer.sections,
+        sections: result.answer.sections.map((section) => ({
+          title: section.title,
+          items: section.items.map((item) => ({
+            text: item.text,
+            basis: item.basis,
+          })),
+        })),
         evidenceGaps: [],
-        suggestedQuestions: result.answer.suggestedQuestions,
+        suggestedQuestions: result.answer.suggestedQuestions.map(
+          (question) => question.question,
+        ),
       };
       sendJson(response, 200, { ...result, answer: publicAnswer });
     } catch (error) {

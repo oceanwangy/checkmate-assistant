@@ -260,6 +260,37 @@ function mergeRecords(
   return target;
 }
 
+const CLIENT_JWT_CONFIGURATION_WRITABLE_FIELDS = new Set([
+  "alg",
+  "lifetime_in_seconds",
+  "scopes",
+]);
+
+function mergeLiveNestedObject(
+  call: ApiPlanCall,
+  key: string,
+  live: Record<string, unknown>,
+  planned: Record<string, unknown>,
+): Record<string, unknown> {
+  if (call.resourceType !== "client" || key !== "jwt_configuration") {
+    return mergeRecords(cloneRecord(live), planned);
+  }
+  for (const plannedKey of Object.keys(planned)) {
+    if (!CLIENT_JWT_CONFIGURATION_WRITABLE_FIELDS.has(plannedKey)) {
+      throw new AppError(
+        "AUTH0_WRITE_FAILED",
+        `The API plan contains a non-writable client JWT setting: jwt_configuration.${plannedKey}`,
+      );
+    }
+  }
+  const writableLive = Object.fromEntries(
+    Object.entries(live).filter(([liveKey]) =>
+      CLIENT_JWT_CONFIGURATION_WRITABLE_FIELDS.has(liveKey),
+    ),
+  );
+  return mergeRecords(writableLive, planned);
+}
+
 function removeNullLiveValues(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(removeNullLiveValues);
@@ -351,8 +382,10 @@ function requestBody(
         typeof existing === "object" &&
         !Array.isArray(existing)
       ) {
-        body[key] = mergeRecords(
-          cloneRecord(existing as Record<string, unknown>),
+        body[key] = mergeLiveNestedObject(
+          call,
+          key,
+          existing as Record<string, unknown>,
           planned as Record<string, unknown>,
         );
       } else {
