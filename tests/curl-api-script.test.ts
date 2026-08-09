@@ -78,12 +78,14 @@ describe("generated curl API scripts", () => {
     const before = {
       id: "con_database",
       name: "Username-Password-Authentication",
+      display_name: "Customer login database",
       options: {
         password_history: { enable: false, size: 5 },
         requires_username: false,
       },
     };
     const expectedBody = {
+      display_name: "Customer login database",
       options: {
         password_history: { enable: true, size: 5 },
         requires_username: false,
@@ -292,6 +294,122 @@ fi
     );
   });
 
+  it("removes non-writable breached-password stage fields from the generated PATCH", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-curl-"));
+    const patchBodyFile = path.join(directory, "patch-body.json");
+    const fakeCurl = path.join(directory, "curl");
+    const scriptFile = path.join(directory, "change.sh");
+    const before = {
+      enabled: true,
+      stage: {
+        "pre-user-registration": {
+          shields: [],
+          future_read_only_field: true,
+        },
+        "pre-change-password": {
+          shields: ["admin_notification"],
+          future_read_only_field: true,
+        },
+        "future-read-only-stage": { shields: ["block"] },
+      },
+    };
+    const expectedBody = {
+      stage: {
+        "pre-user-registration": { shields: ["block"] },
+        "pre-change-password": { shields: ["admin_notification"] },
+      },
+    };
+    const after = {
+      ...before,
+      stage: {
+        ...before.stage,
+        "pre-user-registration": {
+          ...before.stage["pre-user-registration"],
+          shields: ["block"],
+        },
+      },
+    };
+    await writeFile(
+      fakeCurl,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"/oauth/token"* ]]; then
+  printf '%s' '{"access_token":"test-token","scope":"read:attack_protection update:attack_protection"}'
+elif [[ "$*" == *"--request PATCH"* ]]; then
+  cat > "\${PATCH_BODY_FILE}"
+  output_file=""
+  headers_file=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --output)
+        shift
+        output_file="$1"
+        ;;
+      --dump-header)
+        shift
+        headers_file="$1"
+        ;;
+    esac
+    shift
+  done
+  [[ -z "\${output_file}" ]] || printf '%s' '{}' > "\${output_file}"
+  [[ -z "\${headers_file}" ]] || printf 'HTTP/2 200\\r\\n\\r\\n' > "\${headers_file}"
+  printf '200'
+else
+  if [[ -s "\${PATCH_BODY_FILE}" ]]; then
+    printf '%s' '${JSON.stringify(after)}'
+  else
+    printf '%s' '${JSON.stringify(before)}'
+  fi
+fi
+`,
+    );
+    await chmod(fakeCurl, 0o700);
+
+    const call: ApiPlanCall = {
+      id: "api-call-breached-password-stage",
+      method: "PATCH",
+      endpoint: "/api/v2/attack-protection/breached-password-detection",
+      resourceType: "attack_protection",
+      resourceId: "breached-password",
+      resourceName: "Breached Password Detection",
+      bodyStrategy: "merge_live_nested_objects",
+      actionIds: ["action-registration-block"],
+      preconditions: [
+        {
+          path: "stage.pre-user-registration.shields",
+          expectedValue: [],
+        },
+      ],
+      body: {
+        stage: { "pre-user-registration": { shields: ["block"] } },
+      },
+    };
+    const generated = buildCurlApiScript(
+      "dev",
+      call,
+      apiRequestSha256(call.method, call.endpoint, expectedBody),
+      "tenant.auth0.com",
+    );
+    await writeFile(scriptFile, generated.script, { mode: 0o700 });
+    const result = spawnSync("bash", [scriptFile], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ""}`,
+        PATCH_BODY_FILE: patchBodyFile,
+        AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+        AUTH0CHECKMATE_DEV_CLIENT_ID: "client-from-env",
+        AUTH0CHECKMATE_DEV_CLIENT_SECRET: "secret-from-env",
+      },
+    });
+
+    expect(result).toMatchObject({ status: 0, stderr: "" });
+    expect(JSON.parse(await readFile(patchBodyFile, "utf8"))).toEqual(
+      expectedBody,
+    );
+  });
+
   it("re-reads and safely retries a PATCH after Auth0 returns 429", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-curl-"));
     const patchBodyFile = path.join(directory, "patch-body.json");
@@ -419,13 +537,74 @@ fi
     expect(result.stderr).not.toContain("secret-from-env");
   });
 
-  it("runs every validated call in its own subshell", () => {
+  it("uses one token and shared runtime for every validated call", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "checkmate-curl-"));
+    const patchBodyFile = path.join(directory, "patch-body.json");
+    const tokenCountFile = path.join(directory, "token-count.txt");
+    const fakeCurl = path.join(directory, "curl");
+    const scriptFile = path.join(directory, "change.sh");
+    const before = {
+      id: "con_database",
+      name: "Username-Password-Authentication",
+      options: {
+        password_history: { enable: false, size: 5 },
+        requires_username: false,
+      },
+    };
+    const expectedBody = {
+      options: {
+        password_history: { enable: true, size: 5 },
+        requires_username: false,
+      },
+    };
+    const after = { ...before, options: expectedBody.options };
+    await writeFile(
+      fakeCurl,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *"/oauth/token"* ]]; then
+  count=0
+  [[ ! -f "\${TOKEN_COUNT_FILE}" ]] || count="$(cat "\${TOKEN_COUNT_FILE}")"
+  printf '%s' "$((count + 1))" > "\${TOKEN_COUNT_FILE}"
+  printf '%s' '{"access_token":"test-token","scope":"read:connections read:connections_options update:connections update:connections_options"}'
+elif [[ "$*" == *"--request PATCH"* ]]; then
+  cat > "\${PATCH_BODY_FILE}"
+  output_file=""
+  headers_file=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --output)
+        shift
+        output_file="$1"
+        ;;
+      --dump-header)
+        shift
+        headers_file="$1"
+        ;;
+    esac
+    shift
+  done
+  [[ -z "\${output_file}" ]] || printf '%s' '{}' > "\${output_file}"
+  [[ -z "\${headers_file}" ]] || printf 'HTTP/2 200\\r\\n\\r\\n' > "\${headers_file}"
+  printf '200'
+else
+  if [[ -s "\${PATCH_BODY_FILE}" ]]; then
+    printf '%s' '${JSON.stringify(after)}'
+  else
+    printf '%s' '${JSON.stringify(before)}'
+  fi
+fi
+`,
+    );
+    await chmod(fakeCurl, 0o700);
+
     const first = connectionCall();
     const second = {
       ...connectionCall(),
       id: "api-call-2",
       resourceName: "Second database",
     };
+    const digest = apiRequestSha256(first.method, first.endpoint, expectedBody);
     const script = buildApiPlanShellScript({
       schemaVersion: 1,
       generatedAt: "2026-08-03T10:00:00.000Z",
@@ -438,32 +617,52 @@ fi
       calls: [
         {
           ...first,
+          validatedRequestSha256: digest,
           curl: {
             shell: "bash",
             requiredEnvironmentVariables: ["A", "B", "C"],
-            script: "#!/usr/bin/env bash\necho first\nexit 0\n",
+            script: "#!/usr/bin/env bash\nexit 99\n",
           },
         },
         {
           ...second,
+          validatedRequestSha256: digest,
           curl: {
             shell: "bash",
             requiredEnvironmentVariables: ["A", "B", "C"],
-            script: "#!/usr/bin/env bash\necho second\n",
+            script: "#!/usr/bin/env bash\nexit 99\n",
           },
         },
       ],
     });
-    const result = spawnSync("bash", {
-      input: script,
+    await writeFile(scriptFile, script, { mode: 0o700 });
+    const result = spawnSync("bash", [scriptFile], {
       encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ""}`,
+        PATCH_BODY_FILE: patchBodyFile,
+        TOKEN_COUNT_FILE: tokenCountFile,
+        AUTH0CHECKMATE_DEV_DOMAIN: "tenant.auth0.com",
+        AUTH0CHECKMATE_DEV_CLIENT_ID: "client-from-env",
+        AUTH0CHECKMATE_DEV_CLIENT_SECRET: "secret-from-env",
+      },
     });
 
     expect(result).toMatchObject({ status: 0, stderr: "" });
-    expect(result.stdout).toContain("first");
-    expect(result.stdout).toContain("second");
+    expect(result.stdout).toContain("validated API call 1 of 2");
+    expect(result.stdout).toContain("validated API call 2 of 2");
+    expect(result.stdout).toContain(
+      "No change needed: Second database already has the planned settings.",
+    );
     expect(result.stdout).toContain(
       "Applied and verified all validated API calls.",
     );
+    expect(await readFile(tokenCountFile, "utf8")).toBe("1");
+    expect(JSON.parse(await readFile(patchBodyFile, "utf8"))).toEqual(
+      expectedBody,
+    );
+    expect(script.match(/TOKEN_RESPONSE=/g)).toHaveLength(1);
+    expect(script.match(/apply_validated_call \\/g)).toHaveLength(2);
   });
 });

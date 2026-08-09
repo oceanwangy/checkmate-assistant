@@ -15,6 +15,7 @@ import {
   type RateLimitRetryOptions,
   waitForRateLimitRetry,
 } from "./rate-limit-retry.js";
+import { buildWritablePatchBody } from "./writable-patch.js";
 
 const tokenSchema = z.object({
   access_token: z.string().min(1),
@@ -208,10 +209,6 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
-  return structuredClone(value);
-}
-
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonicalJson).join(",")}]`;
@@ -233,106 +230,6 @@ export function apiRequestSha256(
   return createHash("sha256")
     .update(`${method}\n${endpoint}\n${canonicalJson(body)}`, "utf8")
     .digest("hex");
-}
-
-function mergeRecords(
-  target: Record<string, unknown>,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  for (const [key, value] of Object.entries(patch)) {
-    safeSegments(key);
-    const existing = target[key];
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      const existingRecord =
-        existing !== null &&
-        typeof existing === "object" &&
-        !Array.isArray(existing)
-          ? cloneRecord(existing as Record<string, unknown>)
-          : {};
-      target[key] = mergeRecords(
-        existingRecord,
-        value as Record<string, unknown>,
-      );
-    } else {
-      target[key] = structuredClone(value);
-    }
-  }
-  return target;
-}
-
-const CLIENT_JWT_CONFIGURATION_WRITABLE_FIELDS = new Set([
-  "alg",
-  "lifetime_in_seconds",
-  "scopes",
-]);
-
-function mergeLiveNestedObject(
-  call: ApiPlanCall,
-  key: string,
-  live: Record<string, unknown>,
-  planned: Record<string, unknown>,
-): Record<string, unknown> {
-  if (call.resourceType !== "client" || key !== "jwt_configuration") {
-    return mergeRecords(cloneRecord(live), planned);
-  }
-  for (const plannedKey of Object.keys(planned)) {
-    if (!CLIENT_JWT_CONFIGURATION_WRITABLE_FIELDS.has(plannedKey)) {
-      throw new AppError(
-        "AUTH0_WRITE_FAILED",
-        `The API plan contains a non-writable client JWT setting: jwt_configuration.${plannedKey}`,
-      );
-    }
-  }
-  const writableLive = Object.fromEntries(
-    Object.entries(live).filter(([liveKey]) =>
-      CLIENT_JWT_CONFIGURATION_WRITABLE_FIELDS.has(liveKey),
-    ),
-  );
-  return mergeRecords(writableLive, planned);
-}
-
-function removeNullLiveValues(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(removeNullLiveValues);
-  }
-  if (value !== null && typeof value === "object") {
-    const cleaned: Record<string, unknown> = {};
-    for (const [key, nested] of Object.entries(value)) {
-      safeSegments(key);
-      if (nested !== null && nested !== undefined) {
-        cleaned[key] = removeNullLiveValues(nested);
-      }
-    }
-    return cleaned;
-  }
-  return value;
-}
-
-function assertJsonPayload(value: unknown, path = "body"): void {
-  if (
-    value === undefined ||
-    typeof value === "bigint" ||
-    typeof value === "function" ||
-    typeof value === "symbol" ||
-    (typeof value === "number" && !Number.isFinite(value))
-  ) {
-    throw new AppError(
-      "AUTH0_WRITE_FAILED",
-      `The API plan produced an invalid PATCH value at ${path}.`,
-    );
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) =>
-      assertJsonPayload(item, `${path}[${index}]`),
-    );
-    return;
-  }
-  if (value !== null && typeof value === "object") {
-    for (const [key, nested] of Object.entries(value)) {
-      safeSegments(key);
-      assertJsonPayload(nested, `${path}.${key}`);
-    }
-  }
 }
 
 function targetValue(call: ApiPlanCall, path: string): unknown {
@@ -364,50 +261,6 @@ function classifyLiveState(
     }
   }
   return allTargets ? "target" : "safe_to_apply";
-}
-
-function requestBody(
-  call: ApiPlanCall,
-  live: Record<string, unknown>,
-): Record<string, unknown> {
-  if (call.bodyStrategy === "merge_live_nested_objects") {
-    const body: Record<string, unknown> = {};
-    for (const [key, planned] of Object.entries(call.body)) {
-      const existing = live[key];
-      if (
-        planned !== null &&
-        typeof planned === "object" &&
-        !Array.isArray(planned) &&
-        existing !== null &&
-        typeof existing === "object" &&
-        !Array.isArray(existing)
-      ) {
-        body[key] = mergeLiveNestedObject(
-          call,
-          key,
-          existing as Record<string, unknown>,
-          planned as Record<string, unknown>,
-        );
-      } else {
-        body[key] = structuredClone(planned);
-      }
-    }
-    assertJsonPayload(body);
-    return body;
-  }
-  const liveOptions = record(
-    removeNullLiveValues(live.options),
-    "connection options",
-  );
-  const plannedOptions = record(
-    call.body.options,
-    "planned connection options",
-  );
-  const body = {
-    options: mergeRecords(cloneRecord(liveOptions), plannedOptions),
-  };
-  assertJsonPayload(body);
-  return body;
 }
 
 function scopesFor(
@@ -618,7 +471,7 @@ async function readLiveResource(
 ): Promise<Record<string, unknown>> {
   const url = new URL(call.endpoint, baseUrl);
   if (call.resourceType === "connection") {
-    url.searchParams.set("fields", "id,name,strategy,options");
+    url.searchParams.set("fields", "id,name,display_name,strategy,options");
     url.searchParams.set("include_fields", "true");
   }
   const response = await fetchWithRateLimitRetry(
@@ -680,7 +533,7 @@ export async function validateApiPlan(
         options.retry,
       );
       const status = classifyLiveState(call, live);
-      const body = requestBody(call, live);
+      const body = buildWritablePatchBody(call, live);
       const requestSha256 = apiRequestSha256(call.method, call.endpoint, body);
       if (
         requestSha256 &&
@@ -830,7 +683,7 @@ export async function executeApiPlan(
       let verifiedAfterRateLimit: Record<string, unknown> | undefined;
       const retryLimit = rateLimitRetryLimit(options.retry);
       for (let retryIndex = 0; ; retryIndex += 1) {
-        const body = requestBody(call, beforePatch);
+        const body = buildWritablePatchBody(call, beforePatch);
         const actual = apiRequestSha256(call.method, call.endpoint, body);
         if (
           call.validatedRequestSha256 &&
@@ -1008,7 +861,7 @@ export async function rollbackApiPlan(
         });
         continue;
       }
-      const body = requestBody(call, live);
+      const body = buildWritablePatchBody(call, live);
       const response = await fetcher(new URL(call.endpoint, baseUrl), {
         method: "PATCH",
         headers: {

@@ -457,6 +457,12 @@ function requestPreview(call) {
   return element("pre", "request-body", request);
 }
 
+function changeValue(value) {
+  if (value === null || value === undefined) return "Not set";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
+
 function executionSummary(container, response) {
   const result = response.result;
   const succeeded = response.executed && result?.status === "succeeded";
@@ -536,15 +542,31 @@ function renderDevPlan(shell, plan, onResolved) {
     route.append(element("span", "api-url", call.url));
     preview.append(route);
     preview.append(element("h4", "", call.resourceName));
-    const changes = element("ul", "planned-changes");
+    preview.append(element("div", "change-label", "Approved changes"));
+    const changes = element("div", "approved-changes");
     for (const change of call.changes) {
-      changes.append(element("li", "", change.description));
+      const item = element("div", "approved-change");
+      item.append(element("strong", "", change.description));
+      const detail = element("div", "change-detail");
+      detail.append(element("code", "change-path", change.configPath));
+      const values = element("span", "change-values");
+      values.append(
+        element("span", "change-before", changeValue(change.currentValue)),
+        element("span", "change-arrow", "→"),
+        element("span", "change-after", changeValue(change.targetValue)),
+      );
+      detail.append(values);
+      item.append(detail);
+      changes.append(item);
     }
     preview.append(changes);
-    preview.append(element("div", "request-label", "API call about to run"));
-    preview.append(requestPreview(call));
+    const exactRequest = document.createElement("details");
+    exactRequest.className = "exact-request";
+    const summary = document.createElement("summary");
+    summary.textContent = "Exact API payload";
+    exactRequest.append(summary, requestPreview(call));
     if (call.sensitiveValuesRedacted) {
-      preview.append(
+      exactRequest.append(
         element(
           "p",
           "redaction-note",
@@ -552,6 +574,7 @@ function renderDevPlan(shell, plan, onResolved) {
         ),
       );
     }
+    preview.append(exactRequest);
     shell.append(preview);
   }
 

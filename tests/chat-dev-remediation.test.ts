@@ -7,6 +7,7 @@ import { loadCheckmateReport } from "../src/checkmate/report-loader.js";
 import {
   executeChatDevPlan,
   prepareChatDevPlan,
+  redactChatDevRequestBody,
 } from "../src/chat/dev-remediation-service.js";
 
 afterEach(() => {
@@ -14,6 +15,40 @@ afterEach(() => {
 });
 
 describe("chat dev remediation service", () => {
+  it("shows password authentication settings while redacting real secrets", () => {
+    expect(
+      redactChatDevRequestBody({
+        options: {
+          authentication_methods: {
+            password: {
+              enabled: true,
+              api_behavior: "optional",
+              signup_behavior: "allow",
+            },
+          },
+          configuration: {
+            password: "database-password",
+            client_secret: "database-client-secret",
+          },
+        },
+      }),
+    ).toEqual({
+      options: {
+        authentication_methods: {
+          password: {
+            enabled: true,
+            api_behavior: "optional",
+            signup_behavior: "allow",
+          },
+        },
+        configuration: {
+          password: "[REDACTED]",
+          client_secret: "[REDACTED]",
+        },
+      },
+    });
+  });
+
   it("maps a recommended report finding to an exact validated dev PATCH preview", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "chat-dev-plan-"));
     const reportId = "latest-report.json";

@@ -136,15 +136,39 @@ function assertDevWriteBoundary(
   }
 }
 
-function redactRequestBody(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactRequestBody);
+function normalizedKey(value: string): string {
+  return value.toLowerCase().replace(/[-\s]/g, "_");
+}
+
+function isAuthenticationMethodPassword(
+  path: readonly string[],
+  nested: unknown,
+): boolean {
+  return (
+    path.map(normalizedKey).join(".") ===
+      "options.authentication_methods.password" &&
+    nested !== null &&
+    typeof nested === "object" &&
+    !Array.isArray(nested)
+  );
+}
+
+export function redactChatDevRequestBody(
+  value: unknown,
+  path: readonly string[] = [],
+): unknown {
+  if (Array.isArray(value))
+    return value.map((item, index) =>
+      redactChatDevRequestBody(item, [...path, String(index)]),
+    );
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, nested]) => [
         key,
-        SENSITIVE_KEYS.has(key.toLowerCase().replace(/[-\s]/g, "_"))
+        SENSITIVE_KEYS.has(normalizedKey(key)) &&
+        !isAuthenticationMethodPassword([...path, key], nested)
           ? REDACTED
-          : redactRequestBody(nested),
+          : redactChatDevRequestBody(nested, [...path, key]),
       ]),
     );
   }
@@ -259,7 +283,7 @@ export async function prepareChatDevPlan(
       approvedRequestDigests[call.id] = checked.requestSha256;
     }
     const redactedBody = checked.requestBody
-      ? redactRequestBody(checked.requestBody)
+      ? redactChatDevRequestBody(checked.requestBody)
       : undefined;
     const preview: ChatDevApiCallPreview = {
       id: call.id,

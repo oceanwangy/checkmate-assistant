@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { ApiPlan, ApiPlanCall } from "./api-plan.js";
+import { renderCompleteConnectionOptions } from "./terraform-connection-options.js";
 
 const AUTH0_TERRAFORM_PROVIDER_VERSION = "~> 1.52.0";
 
@@ -65,132 +66,6 @@ const CONNECTION_ROOT_IGNORES = [
   "show_as_button",
 ] as const;
 
-// Auth0 warns that omitted connection options can be removed on update. These
-// paths are kept in imported state with lifecycle.ignore_changes unless the
-// administrator explicitly selected that setting in this change package.
-const CONNECTION_OPTION_FIELDS = [
-  "access_token_url",
-  "adfs_server",
-  "allowed_audiences",
-  "api_enable_groups",
-  "api_enable_users",
-  "app_id",
-  "attribute_map",
-  "attributes",
-  "auth_params",
-  "authentication_methods",
-  "authorization_endpoint",
-  "brute_force_protection",
-  "client_id",
-  "client_secret",
-  "community_base_url",
-  "configuration",
-  "connection_settings",
-  "consumer_key",
-  "consumer_secret",
-  "custom_headers",
-  "custom_password_hash",
-  "custom_scripts",
-  "debug",
-  "decryption_key",
-  "destination_url",
-  "digest_algorithm",
-  "disable_cache",
-  "disable_self_service_change_password",
-  "disable_sign_out",
-  "disable_signup",
-  "discovery_url",
-  "domain",
-  "domain_aliases",
-  "dpop_signing_alg",
-  "email",
-  "enable_script_context",
-  "enabled_database_customization",
-  "entity_id",
-  "fed_metadata_xml",
-  "federated_connections_access_tokens",
-  "fields_map",
-  "forward_request_info",
-  "from",
-  "gateway_authentication",
-  "gateway_url",
-  "global_token_revocation_jwt_iss",
-  "global_token_revocation_jwt_sub",
-  "icon_url",
-  "id_token_session_expiry_supported",
-  "id_token_signed_response_algs",
-  "identity_api",
-  "idp_initiated",
-  "import_mode",
-  "ips",
-  "issuer",
-  "jwks_uri",
-  "key_id",
-  "map_user_id_to_id",
-  "max_groups_to_retrieve",
-  "messaging_service_sid",
-  "metadata_url",
-  "metadata_xml",
-  "mfa",
-  "name",
-  "non_persistent_attrs",
-  "passkey_options",
-  "password_complexity_options",
-  "password_dictionary",
-  "password_history",
-  "password_no_personal_info",
-  "password_options",
-  "password_policy",
-  "ping_federate_base_url",
-  "pkce_enabled",
-  "precedence",
-  "protocol_binding",
-  "provider",
-  "realm_fallback",
-  "recipient_url",
-  "request_template",
-  "request_token_url",
-  "requires_username",
-  "scopes",
-  "scripts",
-  "send_back_channel_nonce",
-  "session_key",
-  "set_user_root_attributes",
-  "should_trust_email_verified_connection",
-  "sign_in_endpoint",
-  "sign_out_endpoint",
-  "sign_saml_request",
-  "signature_algorithm",
-  "signature_method",
-  "signing_cert",
-  "signing_key",
-  "strategy_version",
-  "subject",
-  "syntax",
-  "team_id",
-  "template",
-  "tenant_domain",
-  "token_endpoint",
-  "token_endpoint_auth_method",
-  "token_endpoint_auth_signing_alg",
-  "token_endpoint_jwtca_aud_format",
-  "totp",
-  "twilio_sid",
-  "twilio_token",
-  "type",
-  "upstream_params",
-  "use_cert_auth",
-  "use_kerberos",
-  "use_oauth_spec_scope",
-  "use_wsfed",
-  "user_authorization_url",
-  "user_id_attribute",
-  "userinfo_endpoint",
-  "validation",
-  "waad_common_endpoint",
-  "waad_protocol",
-] as const;
-
 const CLIENT_PATHS = new Map([
   ["callbacks", "callbacks"],
   ["cross_origin_authentication", "cross_origin_auth"],
@@ -226,6 +101,10 @@ export interface TerraformCoverage {
     reason: string;
   }>;
 }
+
+export type TerraformValidatedRequestBodies = Readonly<
+  Record<string, Record<string, unknown>>
+>;
 
 function hclString(value: string): string {
   return JSON.stringify(value);
@@ -340,9 +219,13 @@ export function terraformCoverage(plan: ApiPlan): TerraformCoverage {
 function lifecycle(ignoreChanges: readonly string[]): string {
   return `  lifecycle {
     prevent_destroy = true
-    ignore_changes = [
+${
+  ignoreChanges.length > 0
+    ? `    ignore_changes = [
 ${ignoreChanges.map((field) => `      ${field},`).join("\n")}
-    ]
+    ]`
+    : ""
+}
   }`;
 }
 
@@ -401,76 +284,23 @@ import {
 }`;
 }
 
-function connectionOptions(call: ApiPlanCall): {
-  content: string;
-  selected: Set<string>;
-  nestedIgnores: string[];
-} {
-  const paths = new Set(
-    call.preconditions.map(({ path: configPath }) => configPath),
-  );
-  const selected = new Set(
-    [...paths].map((configPath) => CONNECTION_PATHS.get(configPath)!),
-  );
-  const blocks: string[] = [];
-  const nestedIgnores: string[] = [];
-  if (paths.has("options.passwordPolicy")) {
-    blocks.push(
-      `    password_policy = ${hclValue(target(call, "options.passwordPolicy"))}`,
-    );
-  }
-  if (paths.has("options.password_complexity_options.min_length")) {
-    blocks.push(`    password_complexity_options {
-      min_length = ${hclValue(target(call, "options.password_complexity_options.min_length"))}
-    }`);
-  }
-  if (paths.has("options.password_history.enable")) {
-    blocks.push(`    password_history {
-      enable = ${hclValue(target(call, "options.password_history.enable"))}
-    }`);
-    nestedIgnores.push("options[0].password_history[0].size");
-  }
-  if (paths.has("options.password_no_personal_info.enable")) {
-    blocks.push(`    password_no_personal_info {
-      enable = ${hclValue(target(call, "options.password_no_personal_info.enable"))}
-    }`);
-  }
-  if (paths.has("options.authentication_methods.passkey.enabled")) {
-    blocks.push(`    authentication_methods {
-      passkey {
-        enabled = ${hclValue(target(call, "options.authentication_methods.passkey.enabled"))}
-      }
-    }`);
-    nestedIgnores.push(
-      "options[0].authentication_methods[0].email_otp",
-      "options[0].authentication_methods[0].password",
-      "options[0].authentication_methods[0].phone_otp",
-    );
-  }
-  if (paths.has("options.attributes.email.verification_method")) {
-    blocks.push(`    attributes {
-      email {
-        verification_method = ${hclValue(target(call, "options.attributes.email.verification_method"))}
-      }
-    }`);
-    nestedIgnores.push(
-      "options[0].attributes[0].phone_number",
-      "options[0].attributes[0].username",
-      "options[0].attributes[0].email[0].identifier",
-      "options[0].attributes[0].email[0].profile_required",
-      "options[0].attributes[0].email[0].signup",
-      "options[0].attributes[0].email[0].unique",
-    );
-  }
-  return { content: blocks.join("\n"), selected, nestedIgnores };
-}
-
-function connectionResource(call: ApiPlanCall): string {
+function connectionResource(
+  call: ApiPlanCall,
+  validatedRequestBody: Record<string, unknown> | undefined,
+): string {
   const label = terraformLabel(call);
-  const options = connectionOptions(call);
-  const ignoredOptions = CONNECTION_OPTION_FIELDS.filter(
-    (field) => !options.selected.has(field),
-  ).map((field) => `options[0].${field}`);
+  if (!validatedRequestBody) {
+    throw new Error(
+      `Terraform requires the complete validated request body for ${call.resourceName}.`,
+    );
+  }
+  const options = valueAt(validatedRequestBody, "options");
+  if (options === undefined) {
+    throw new Error(
+      `Terraform requires the complete validated connection options for ${call.resourceName}.`,
+    );
+  }
+  const renderedOptions = renderCompleteConnectionOptions(options, label);
   return `data "auth0_connection" "${label}" {
   connection_id        = ${hclString(call.resourceId)}
   skip_enabled_clients = true
@@ -481,14 +311,10 @@ resource "auth0_connection" "${label}" {
   strategy = data.auth0_connection.${label}.strategy
 
   options {
-${options.content}
+${renderedOptions}
   }
 
-${lifecycle([
-  ...CONNECTION_ROOT_IGNORES,
-  ...ignoredOptions,
-  ...options.nestedIgnores,
-])}
+${lifecycle(CONNECTION_ROOT_IGNORES)}
 }
 
 import {
@@ -605,7 +431,10 @@ ${changes.join(",\n")}
       }`;
 }
 
-export function buildTerraformDeploymentConfiguration(plan: ApiPlan): string {
+export function buildTerraformDeploymentConfiguration(
+  plan: ApiPlan,
+  validatedRequestBodies: TerraformValidatedRequestBodies = {},
+): string {
   const coverage = terraformCoverage(plan);
   const managed = plan.calls.filter((call) =>
     coverage.managedCallIds.includes(call.id),
@@ -616,7 +445,7 @@ export function buildTerraformDeploymentConfiguration(plan: ApiPlan): string {
   resources.push(
     ...managed
       .filter((call) => call.resourceType === "connection")
-      .map(connectionResource),
+      .map((call) => connectionResource(call, validatedRequestBodies[call.id])),
   );
   const attackCalls = managed.filter(
     (call) => call.resourceType === "attack_protection",
@@ -628,7 +457,8 @@ export function buildTerraformDeploymentConfiguration(plan: ApiPlan): string {
   return `# Generated by CheckMate Remediation Assistant.
 # Genuine deployment configuration for existing Auth0 resources.
 # Review terraform plan before apply. Import blocks adopt the existing resources into this state.
-# prevent_destroy and ignore_changes protect unrelated imported settings.
+# Complete connection options come from the live-preflighted desired state.
+# prevent_destroy protects imported resources; targeted ignore_changes marks fields managed elsewhere.
 
 terraform {
   required_version = ">= 1.5.0"

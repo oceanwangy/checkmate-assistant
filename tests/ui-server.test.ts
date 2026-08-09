@@ -135,6 +135,7 @@ describe("local review UI", () => {
             method: call.method,
             resourceName: call.resourceName,
             status: "ready",
+            requestBody: structuredClone(call.body),
             requestSha256: "a".repeat(64),
           })),
         }),
@@ -417,6 +418,7 @@ describe("local review UI", () => {
               shellFile: string;
               terraformFile: string;
               apiPlanSha256: string;
+              apiValidation: ApiPlanValidationResult;
             };
             prod: {
               apiFile: string;
@@ -455,6 +457,9 @@ describe("local review UI", () => {
       expect(submitted.state.changePackage.dev.apiPlanSha256).toMatch(
         /^[a-f0-9]{64}$/,
       );
+      expect(
+        submitted.state.changePackage.dev.apiValidation.calls[0],
+      ).not.toHaveProperty("requestBody");
       const packagePaths = createChangePackagePaths(running.outputPath);
       const apiPlan = apiPlanSchema.parse(
         parse(await readFile(packagePaths.dev.apiPlan, "utf8")),

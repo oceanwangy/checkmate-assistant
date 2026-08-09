@@ -935,13 +935,95 @@ summary:focus-visible {
   line-height: 1.55;
 }
 
-.request-label {
-  margin-bottom: 6px;
-  color: var(--muted);
+.change-label {
+  margin: 0 0 8px;
+  color: var(--green);
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 850;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.approved-changes {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.approved-change {
+  padding: 11px 12px;
+  border: 1px solid #c7ddd2;
+  border-radius: 10px;
+  background: #f1faf5;
+  color: #284438;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.approved-change strong {
+  color: var(--ink);
+}
+
+.change-detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 7px;
+}
+
+.change-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.change-values {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.change-before {
+  color: var(--muted);
+}
+
+.change-arrow {
+  color: var(--green);
+  font-weight: 850;
+}
+
+.change-after {
+  color: var(--green);
+  font-weight: 800;
+}
+
+.exact-request {
+  border-top: 1px solid #e5ece8;
+  padding-top: 12px;
+}
+
+.exact-request summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.exact-request[open] summary {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 680px) {
+  .change-detail {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 .request-body {

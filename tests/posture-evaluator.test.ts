@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadCheckmateReport } from "../src/checkmate/report-loader.js";
 import type { NormalizedCheckmateFinding } from "../src/findings/types.js";
@@ -11,6 +12,11 @@ import {
   classifyPostureScore,
   evaluatePosture,
 } from "../src/posture/evaluator.js";
+
+const reportFixture = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures/checkmate-report.json",
+);
 
 function finding(
   validatorId: string,
@@ -104,12 +110,8 @@ describe("tenant configuration posture", () => {
     ]);
   });
 
-  it("calculates 44 starting points from the latest CheckMate report", async () => {
-    const report = await loadCheckmateReport(
-      path.resolve(
-        "reports/a0-checkmate.au.auth0.com_en_2026-08-03_17_13_09_report.json",
-      ),
-    );
+  it("calculates 44 starting points from a full CheckMate report", async () => {
+    const report = await loadCheckmateReport(reportFixture);
     const assessment = evaluatePosture(report.findings);
 
     expect(assessment.current).toMatchObject({ score: 44, rating: "red" });

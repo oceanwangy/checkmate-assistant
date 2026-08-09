@@ -1,4 +1,9 @@
 import type { ApiPlanCall } from "./api-plan.js";
+import {
+  assertSupportedApiPlanCall,
+  BREACHED_PASSWORD_STAGE_WRITABLE_FIELDS,
+  CLIENT_JWT_WRITABLE_FIELDS,
+} from "../auth0/writable-patch.js";
 
 function bashQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -8,20 +13,25 @@ function base64Json(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
 }
 
-function scopes(call: ApiPlanCall): string {
-  if (call.resourceType === "client") return "read:clients update:clients";
+function scopes(call: ApiPlanCall): string[] {
+  if (call.resourceType === "client") return ["read:clients", "update:clients"];
   if (call.resourceType === "connection") {
-    return "read:connections read:connections_options update:connections update:connections_options";
+    return [
+      "read:connections",
+      "read:connections_options",
+      "update:connections",
+      "update:connections_options",
+    ];
   }
   if (call.resourceType === "attack_protection") {
-    return "read:attack_protection update:attack_protection";
+    return ["read:attack_protection", "update:attack_protection"];
   }
   throw new Error("Unsupported API plan resource type.");
 }
 
 function readEndpoint(call: ApiPlanCall): string {
   return call.resourceType === "connection"
-    ? `${call.endpoint}?fields=id,name,strategy,options&include_fields=true`
+    ? `${call.endpoint}?fields=id,name,display_name,strategy,options&include_fields=true`
     : call.endpoint;
 }
 
@@ -59,6 +69,8 @@ try {
 
 const REQUEST_BUILDER_SCRIPT = `const crypto = require("node:crypto");
 const fs = require("node:fs");
+const clientJwtWritableFields = new Set(${JSON.stringify(CLIENT_JWT_WRITABLE_FIELDS)});
+const breachedPasswordStageWritableFields = ${JSON.stringify(BREACHED_PASSWORD_STAGE_WRITABLE_FIELDS)};
 
 function pathValue(source, dottedPath) {
   return dottedPath.split(".").reduce((current, segment) =>
@@ -72,26 +84,59 @@ function same(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function merge(current, planned) {
+function merge(current, planned, deleteNulls = false) {
   if (current !== null && typeof current === "object" && !Array.isArray(current) &&
       planned !== null && typeof planned === "object" && !Array.isArray(planned)) {
     const result = structuredClone(current);
-    for (const [key, value] of Object.entries(planned)) result[key] = merge(result[key], value);
+    for (const [key, value] of Object.entries(planned)) {
+      if (deleteNulls && value === null) delete result[key];
+      else result[key] = merge(result[key], value, deleteNulls);
+    }
     return result;
   }
   return structuredClone(planned);
 }
 
-function mergeLiveNestedObject(resourceType, key, current, planned) {
-  const merged = merge(current, planned);
-  if (resourceType !== "client" || key !== "jwt_configuration") return merged;
-  const writable = new Set(["alg", "lifetime_in_seconds", "scopes"]);
-  for (const plannedKey of Object.keys(planned)) {
-    if (!writable.has(plannedKey)) {
+function clientJwtBody(current, planned) {
+  for (const plannedKey of Object.keys(planned ?? {})) {
+    if (!clientJwtWritableFields.has(plannedKey)) {
       throw new Error("Execution stopped: API plan contains a non-writable client JWT setting.");
     }
   }
-  return Object.fromEntries(Object.entries(merged).filter(([mergedKey]) => writable.has(mergedKey)));
+  const writableCurrent = Object.fromEntries(Object.entries(current ?? {})
+    .filter(([key]) => clientJwtWritableFields.has(key)));
+  return merge(writableCurrent, planned);
+}
+
+function breachedPasswordStageBody(current, planned) {
+  const result = {};
+  for (const [stage, fields] of Object.entries(breachedPasswordStageWritableFields)) {
+    const writable = new Set(fields);
+    const currentStage = current?.[stage] ?? {};
+    const plannedStage = planned?.[stage];
+    if (plannedStage !== undefined) {
+      for (const plannedKey of Object.keys(plannedStage)) {
+        if (!writable.has(plannedKey)) {
+          throw new Error("Execution stopped: API plan contains a non-writable breached-password stage setting.");
+        }
+      }
+    }
+    const selected = Object.fromEntries(Object.entries(currentStage)
+      .filter(([key]) => writable.has(key)));
+    const merged = merge(selected, plannedStage ?? {});
+    if (Object.keys(merged).length > 0) result[stage] = merged;
+  }
+  return result;
+}
+
+function mergeLiveNestedObject(resourceType, endpoint, key, current, planned) {
+  if (resourceType === "client" && key === "jwt_configuration") {
+    return clientJwtBody(current, planned);
+  }
+  if (endpoint === "/api/v2/attack-protection/breached-password-detection" && key === "stage") {
+    return breachedPasswordStageBody(current, planned);
+  }
+  return structuredClone(planned);
 }
 
 function stripNulls(value) {
@@ -133,9 +178,15 @@ try {
   let body;
   if (process.env.CHECKMATE_BODY_STRATEGY === "merge_live_nested_objects") {
     body = Object.fromEntries(Object.entries(planned).map(([key, value]) =>
-      [key, mergeLiveNestedObject(process.env.CHECKMATE_RESOURCE_TYPE, key, live[key], value)]));
+      [key, mergeLiveNestedObject(process.env.CHECKMATE_RESOURCE_TYPE, process.env.CHECKMATE_ENDPOINT, key, live[key], value)]));
   } else if (process.env.CHECKMATE_BODY_STRATEGY === "merge_live_connection_options") {
-    body = { options: merge(stripNulls(live.options ?? {}), planned.options) };
+    if (typeof live.strategy === "string" && live.strategy !== "auth0") {
+      throw new Error("Execution stopped: target is not an Auth0 database connection.");
+    }
+    body = {
+      ...(typeof live.display_name === "string" ? { display_name: live.display_name } : {}),
+      options: merge(stripNulls(live.options ?? {}), planned.options, true),
+    };
   } else {
     throw new Error("Execution stopped: unsupported body strategy.");
   }
@@ -224,6 +275,24 @@ try {
   process.exit(1);
 }`;
 
+export const CURL_API_SHELL_RUNTIME = {
+  tokenPayloadScript: TOKEN_PAYLOAD_SCRIPT,
+  tokenParserScript: TOKEN_PARSER_SCRIPT,
+  requestBuilderScript: REQUEST_BUILDER_SCRIPT,
+  responseFieldScript: RESPONSE_FIELD_SCRIPT,
+  rateLimitDelayScript: RATE_LIMIT_DELAY_SCRIPT,
+  patchErrorScript: PATCH_ERROR_SCRIPT,
+  verifyScript: VERIFY_SCRIPT,
+} as const;
+
+export function curlApiRequiredScopes(call: ApiPlanCall): readonly string[] {
+  return scopes(call);
+}
+
+export function curlApiReadEndpoint(call: ApiPlanCall): string {
+  return readEndpoint(call);
+}
+
 export interface CurlApiScript {
   shell: "bash";
   requiredEnvironmentVariables: string[];
@@ -236,6 +305,7 @@ export function buildCurlApiScript(
   requestSha256: string,
   expectedDomain: string,
 ): CurlApiScript {
+  assertSupportedApiPlanCall(call);
   if (!/^[a-zA-Z0-9.-]+\.auth0\.com$/.test(expectedDomain)) {
     throw new Error(
       "The curl API script requires a valid Auth0 tenant domain.",
@@ -278,7 +348,7 @@ if [[ "\${DOMAIN}" != "\${EXPECTED_DOMAIN}" ]]; then
 fi
 
 export BASE_URL="https://\${DOMAIN}"
-export SCOPES=${bashQuote(scopes(call))}
+export SCOPES=${bashQuote(scopes(call).join(" "))}
 export CHECKMATE_ENDPOINT=${bashQuote(call.endpoint)}
 export CHECKMATE_READ_ENDPOINT=${bashQuote(readEndpoint(call))}
 export CHECKMATE_RESOURCE_NAME=${bashQuote(call.resourceName)}

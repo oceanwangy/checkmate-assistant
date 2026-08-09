@@ -59,9 +59,36 @@ function plan(): ApiPlan {
   };
 }
 
+function validatedRequestBodies(): Record<string, Record<string, unknown>> {
+  return {
+    "api-call-1": {
+      options: {
+        mfa: { active: true, return_enroll_settings: true },
+        import_mode: false,
+        configuration: { private_key: "must-not-be-embedded" },
+        passwordPolicy: "good",
+        passkey_options: {
+          challenge_ui: "both",
+          local_enrollment_enabled: true,
+          progressive_enrollment_enabled: true,
+        },
+        authentication_methods: {
+          password: { enabled: true },
+          passkey: { enabled: true },
+        },
+        password_history: { enable: true, size: 5 },
+        requires_username: false,
+      },
+    },
+  };
+}
+
 describe("Terraform deployment output", () => {
   it("imports and manages supported resources through the official Auth0 provider", () => {
-    const terraform = buildTerraformDeploymentConfiguration(plan());
+    const terraform = buildTerraformDeploymentConfiguration(
+      plan(),
+      validatedRequestBodies(),
+    );
 
     expect(terraform).toContain('source  = "auth0/auth0"');
     expect(terraform).toContain('version = "~> 1.52.0"');
@@ -75,9 +102,35 @@ describe("Terraform deployment output", () => {
     expect(terraform).toContain('connection_id        = "con_dev"');
     expect(terraform).toContain('grant_types       = ["authorization_code"]');
     expect(terraform).toContain("password_history {");
-    expect(terraform).toContain("options[0].password_history[0].size");
+    expect(terraform).toContain("size = 5");
+    expect(terraform).toContain("mfa {");
+    expect(terraform).toContain("return_enroll_settings = true");
+    expect(terraform).toContain('password_policy = "good"');
+    expect(terraform).toContain("passkey_options {");
+    expect(terraform).toContain(
+      "configuration = data.auth0_connection.username_password_authentication_043ac6d9.options[0].configuration",
+    );
+    expect(terraform).not.toContain("must-not-be-embedded");
+    expect(terraform).not.toContain("options[0].password_history");
     expect(terraform).toContain("api_only_call_ids          = []");
     expect(terraform).not.toContain("/private/reports");
+  });
+
+  it("fails closed when complete live connection options are unavailable", () => {
+    expect(() => buildTerraformDeploymentConfiguration(plan())).toThrow(
+      "complete validated request body",
+    );
+  });
+
+  it("fails closed when the provider schema cannot represent a live option", () => {
+    const bodies = validatedRequestBodies();
+    (bodies["api-call-1"]!.options as Record<string, unknown>)[
+      "future_read_only_field"
+    ] = true;
+
+    expect(() => buildTerraformDeploymentConfiguration(plan(), bodies)).toThrow(
+      "cannot safely represent connection option",
+    );
   });
 
   it("reports official-provider coverage for every supported call", () => {
@@ -92,7 +145,7 @@ describe("Terraform deployment output", () => {
     const terraformFile = path.join(directory, "main.tf");
     await writeFile(
       terraformFile,
-      buildTerraformDeploymentConfiguration(plan()),
+      buildTerraformDeploymentConfiguration(plan(), validatedRequestBodies()),
     );
     const runner = vi
       .fn<TerraformCommandRunner>()

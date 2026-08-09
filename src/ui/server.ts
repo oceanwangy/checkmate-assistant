@@ -51,6 +51,7 @@ import {
   buildTerraformDeploymentConfiguration,
   terraformCoverage,
   type TerraformCoverage,
+  type TerraformValidatedRequestBodies,
 } from "../remediation/terraform-plan.js";
 import {
   validateTerraformConfiguration,
@@ -360,7 +361,7 @@ export async function startUiServer(
       return await (dependencies.apiPlanValidator ?? validateApiPlan)(
         plan,
         config,
-        { now, authorizationMode },
+        { now, authorizationMode, includeRequestBodies: true },
       );
     } catch (error) {
       return {
@@ -372,6 +373,30 @@ export async function startUiServer(
       };
     }
   };
+
+  const terraformRequestBodies = (
+    validation: ApiPlanValidationResult,
+  ): TerraformValidatedRequestBodies =>
+    Object.fromEntries(
+      validation.calls.flatMap((call) =>
+        call.requestBody ? [[call.id, call.requestBody]] : [],
+      ),
+    );
+
+  const withoutRequestBodies = (
+    validation: ApiPlanValidationResult,
+  ): ApiPlanValidationResult => ({
+    ...validation,
+    calls: validation.calls.map((call) => ({
+      id: call.id,
+      endpoint: call.endpoint,
+      method: call.method,
+      resourceName: call.resourceName,
+      status: call.status,
+      ...(call.requestSha256 ? { requestSha256: call.requestSha256 } : {}),
+      ...(call.error ? { error: call.error } : {}),
+    })),
+  });
 
   const runTerraformValidation = (
     terraformFile: string,
@@ -1018,11 +1043,17 @@ export async function startUiServer(
           ),
           writeTextArtifact(
             paths.dev.terraform,
-            buildTerraformDeploymentConfiguration(devPlan),
+            buildTerraformDeploymentConfiguration(
+              devPlan,
+              terraformRequestBodies(devDraftValidation),
+            ),
           ),
           writeTextArtifact(
             paths.prod.terraform,
-            buildTerraformDeploymentConfiguration(prodPlan),
+            buildTerraformDeploymentConfiguration(
+              prodPlan,
+              terraformRequestBodies(prodDraftValidation),
+            ),
           ),
         ]);
         const [devArtifact, prodArtifact] = await Promise.all([
@@ -1050,8 +1081,8 @@ export async function startUiServer(
             ],
           );
         }
-        const devApiValidation = devDraftValidation;
-        const prodApiValidation = prodDraftValidation;
+        const devApiValidation = withoutRequestBodies(devDraftValidation);
+        const prodApiValidation = withoutRequestBodies(prodDraftValidation);
         const invalidArtifacts = [
           ...(!devApiValidation.valid
             ? [`dev API: ${devApiValidation.error ?? "validation failed"}`]
