@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sS -o /dev/null -w 'HTTP %{http_code} in %{time_total}s\\\\n' --retry 60 --retry-delay 1 --retry-connrefused --max-time 120 http://127.0.0.1:4317/)",
+      "Bash(curl -sS -o /dev/null -w 'HTTP %{http_code} in %{time_total}s\\\\n' --retry 90 --retry-delay 1 --retry-connrefused --max-time 180 http://127.0.0.1:4320/)"
+    ]
+  }
+}

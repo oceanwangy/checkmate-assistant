@@ -6,6 +6,7 @@ import { AnthropicChatModel } from "../apps/checkmate-chat/src/model/anthropic.j
 import type { ModelRequest } from "../apps/checkmate-chat/src/model/contracts.js";
 import { GoogleChatModel } from "../apps/checkmate-chat/src/model/google.js";
 import { OpenAiChatModel } from "../apps/checkmate-chat/src/model/openai.js";
+import { chatAnswerSchema } from "../apps/checkmate-chat/src/schema.js";
 
 const parsedAnswer = {
   headline: "Enable breached-password detection.",
@@ -277,7 +278,23 @@ describe("chat model provider adapters", () => {
     const responseFormat = asObject(firstRequest.response_format);
     expect(responseFormat.type).toBe("text");
     expect(responseFormat.mime_type).toBe("application/json");
-    expect(asObject(responseFormat.schema)).not.toEqual({});
+    const responseSchema = asObject(responseFormat.schema);
+    expect(responseSchema).not.toEqual({});
+    expect(JSON.stringify(responseSchema)).not.toMatch(
+      /additionalProperties|minItems|maxItems|minLength|maxLength/,
+    );
+    const properties = asObject(responseSchema.properties);
+    const sections = asObject(properties.sections);
+    const section = asObject(sections.items);
+    const sectionProperties = asObject(section.properties);
+    const items = asObject(sectionProperties.items);
+    const item = asObject(items.items);
+    const itemProperties = asObject(item.properties);
+    expect(asObject(itemProperties.basis).enum).toEqual([
+      "checkmate_report",
+      "auth0_live",
+    ]);
+    expect(responseSchema.required).toContain("actionConfirmations");
     expect(firstRequest.generation_config).toEqual(
       expect.objectContaining({
         thinking_level: "high",
@@ -334,5 +351,58 @@ describe("chat model provider adapters", () => {
     await expect(model.create(initialRequest)).rejects.toThrow(
       "The Gemini tool arguments were not an object.",
     );
+  });
+
+  it("bounds Gemini output before applying the shared display schema", async () => {
+    const oversized = {
+      ...parsedAnswer,
+      headline: "h".repeat(300),
+      headlineFindingIds: Array.from({ length: 6 }, (_, index) =>
+        `finding-${index}`.repeat(30),
+      ),
+      sections: Array.from({ length: 8 }, () => ({
+        title: "t".repeat(160),
+        items: Array.from({ length: 10 }, () => ({
+          text: "x".repeat(900),
+          basis: "checkmate_report",
+          findingIds: Array.from({ length: 6 }, (_, index) =>
+            `finding-${index}`.repeat(30),
+          ),
+        })),
+      })),
+      evidenceGaps: Array.from({ length: 8 }, () => "e".repeat(500)),
+      suggestedQuestions: Array.from({ length: 6 }, () => ({
+        question: "q".repeat(220),
+        findingIds: ["finding-1"],
+      })),
+      actionConfirmations: Array.from({ length: 2 }, () => ({
+        question: "a".repeat(260),
+        findingIds: ["finding-1"],
+      })),
+    };
+    const create = vi.fn().mockResolvedValue({
+      steps: [
+        {
+          type: "model_output",
+          content: [{ type: "text", text: JSON.stringify(oversized) }],
+        },
+      ],
+      output_text: JSON.stringify(oversized),
+    });
+    const client = { interactions: { create } } as unknown as GoogleGenAI;
+    const model = new GoogleChatModel(
+      "gemini-secret",
+      "gemini-test",
+      "high",
+      180_000,
+      client,
+    );
+
+    const result = await model.create(initialRequest);
+    expect(result.outputParsed).toEqual(
+      expect.objectContaining({ headline: "h".repeat(240) }),
+    );
+    expect(asObject(result.outputParsed).sections as unknown[]).toHaveLength(6);
+    expect(chatAnswerSchema.safeParse(result.outputParsed).success).toBe(true);
   });
 });
